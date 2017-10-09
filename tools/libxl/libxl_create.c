@@ -883,12 +883,12 @@ static void initiate_domain_create(libxl__egc *egc,
     /* PV vNUMA is not yet supported because there is an issue with
      * cpuid handling.
      */
-    if (d_config->c_info.type == LIBXL_DOMAIN_TYPE_PV &&
-        d_config->b_info.num_vnuma_nodes) {
-        ret = ERROR_INVAL;
-        LOGD(ERROR, domid, "PV vNUMA is not yet supported");
-        goto error_out;
-    }
+    // if (d_config->c_info.type == LIBXL_DOMAIN_TYPE_PV &&
+    //     d_config->b_info.num_vnuma_nodes) {
+    //     ret = ERROR_INVAL;
+    //     LOGD(ERROR, domid, "PV vNUMA is not yet supported");
+    //     goto error_out;
+    // }
 
     ret = libxl__domain_create_info_setdefault(gc, &d_config->c_info);
     if (ret) {
