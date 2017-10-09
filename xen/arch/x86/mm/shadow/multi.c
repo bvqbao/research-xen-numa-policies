@@ -3488,7 +3488,7 @@ static int sh_page_fault(struct vcpu *v,
      * would be a good unshadow hint. If we *do* decide to unshadow-on-fault
      * then it must be 'failable': we cannot require the unshadow to succeed.
      */
-    if ( r == X86EMUL_UNHANDLEABLE )
+    if ( r == X86EMUL_UNHANDLEABLE || r == X86EMUL_UNIMPLEMENTED )
     {
         perfc_incr(shadow_fault_emulate_failed);
 #if SHADOW_OPTIMIZATIONS & SHOPT_FAST_EMULATION
@@ -3498,8 +3498,8 @@ static int sh_page_fault(struct vcpu *v,
             v->arch.paging.last_write_emul_ok = 0;
         }
 #endif
-        SHADOW_PRINTK("emulator failure, unshadowing mfn %#lx\n",
-                       mfn_x(gmfn));
+        SHADOW_PRINTK("emulator failure (rc=%d), unshadowing mfn %#lx\n",
+                       r, mfn_x(gmfn));
         /* If this is actually a page table, then we have a bug, and need
          * to support more operations in the emulator.  More likely,
          * though, this is a hint that this page should not be shadowed. */

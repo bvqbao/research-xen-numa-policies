@@ -40,7 +40,7 @@ static void realmode_deliver_exception(
     last_byte = (vector * 4) + 3;
     if ( idtr->limit < last_byte ||
          hvm_copy_from_guest_phys(&cs_eip, idtr->base + vector * 4, 4) !=
-         HVMCOPY_okay )
+         HVMTRANS_okay )
     {
         /* Software interrupt? */
         if ( insn_len != 0 )
@@ -112,6 +112,15 @@ void vmx_realmode_emulate_one(struct hvm_emulate_ctxt *hvmemul_ctxt)
         goto fail;
     }
 
+    if ( rc == X86EMUL_UNRECOGNIZED )
+    {
+        gdprintk(XENLOG_ERR, "Unrecognized insn.\n");
+        if ( curr->arch.hvm_vcpu.guest_cr[0] & X86_CR0_PE )
+            goto fail;
+
+        realmode_deliver_exception(TRAP_invalid_op, 0, hvmemul_ctxt);
+    }
+
     if ( rc == X86EMUL_EXCEPTION )
     {
         if ( unlikely(curr->domain->debugger_attached) &&
@@ -138,7 +147,7 @@ void vmx_realmode_emulate_one(struct hvm_emulate_ctxt *hvmemul_ctxt)
     return;
 
  fail:
-    hvm_dump_emulation_state(XENLOG_G_ERR, "Real-mode", hvmemul_ctxt);
+    hvm_dump_emulation_state(XENLOG_G_ERR, "Real-mode", hvmemul_ctxt, rc);
     domain_crash(curr->domain);
 }
 

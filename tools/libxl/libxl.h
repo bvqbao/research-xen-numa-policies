@@ -311,6 +311,28 @@
 #define LIBXL_HAVE_P9S 1
 
 /*
+ * LIBXL_HAVE_BUILDINFO_GRANT_LIMITS indicates that libxl_domain_build_info
+ * has the max_grant_frames and max_maptrack_frames fields.
+ */
+#define LIBXL_HAVE_BUILDINFO_GRANT_LIMITS 1
+
+/*
+ * LIBXL_HAVE_BUILDINFO_* indicates that libxl_domain_build_info has
+ * the field represented by the '*'. The original position of those
+ * fields is:
+ *  - u.hvm.timer_mode
+ *  - u.hvm.apic
+ *  - u.hvm.nested_hvm
+ *  - u.pv.bootloader
+ *  - u.pv.bootloader_args
+ */
+#define LIBXL_HAVE_BUILDINFO_TIMER_MODE 1
+#define LIBXL_HAVE_BUILDINFO_APIC 1
+#define LIBXL_HAVE_BUILDINFO_NESTED_HVM 1
+#define LIBXL_HAVE_BUILDINFO_BOOTLOADER 1
+#define LIBXL_HAVE_BUILDINFO_BOOTLOADER_ARGS 1
+
+/*
  * libxl ABI compatibility
  *
  * The only guarantee which libxl makes regarding ABI compatibility
@@ -642,6 +664,15 @@ typedef struct libxl__ctx libxl_ctx;
  * yet allocated for all domains.
  */
 #define LIBXL_HAVE_PHYSINFO_OUTSTANDING_PAGES 1
+
+/*
+ * LIBXL_HAVE_PHYSINFO_MAX_POSSIBLE_MFN
+ *
+ * If this is defined, libxl_physinfo structure will contain an uint64 field
+ * called max_possible_mfn, containing the highest possible mfn on this host,
+ * possibly taking memory hotplug into account.
+ */
+#define LIBXL_HAVE_PHYSINFO_MAX_POSSIBLE_MFN 1
 
 /*
  * LIBXL_HAVE_DOMINFO_OUTSTANDING_MEMKB 1
@@ -983,14 +1014,6 @@ void libxl_mac_copy(libxl_ctx *ctx, libxl_mac *dst, const libxl_mac *src);
  * the libxl_gfx_passthru_kind enumeration is defined.
 */
 #define LIBXL_HAVE_GFX_PASSTHRU_KIND
-
-/*
- * LIBXL_HAVE_DEVICE_MODEL_VERSION_NONE
- *
- * In the case that LIBXL_HAVE_DEVICE_MODEL_VERSION_NONE is set libxl
- * allows the creation of HVM guests without a device model.
- */
-#define LIBXL_HAVE_DEVICE_MODEL_VERSION_NONE 1
 
 /*
  * LIBXL_HAVE_CHECKPOINTED_STREAM
@@ -1606,9 +1629,6 @@ libxl_vcpuinfo *libxl_list_vcpu(libxl_ctx *ctx, uint32_t domid,
                                 int *nb_vcpu, int *nr_cpus_out);
 void libxl_vcpuinfo_list_free(libxl_vcpuinfo *, int nr_vcpus);
 
-void libxl_device_vtpm_list_free(libxl_device_vtpm*, int nr_vtpms);
-void libxl_vtpminfo_list_free(libxl_vtpminfo *, int nr_vtpms);
-
 /*
  * Devices
  * =======
@@ -1749,9 +1769,14 @@ int libxl_device_disk_destroy(libxl_ctx *ctx, uint32_t domid,
                               const libxl_asyncop_how *ao_how)
                               LIBXL_EXTERNAL_CALLERS_ONLY;
 
-libxl_device_disk *libxl_device_disk_list(libxl_ctx *ctx, uint32_t domid, int *num);
+libxl_device_disk *libxl_device_disk_list(libxl_ctx *ctx,
+                                          uint32_t domid, int *num)
+                                          LIBXL_EXTERNAL_CALLERS_ONLY;
+void libxl_device_disk_list_free(libxl_device_disk* list, int num)
+                                 LIBXL_EXTERNAL_CALLERS_ONLY;
 int libxl_device_disk_getinfo(libxl_ctx *ctx, uint32_t domid,
-                              libxl_device_disk *disk, libxl_diskinfo *diskinfo);
+                              libxl_device_disk *disk, libxl_diskinfo *diskinfo)
+                              LIBXL_EXTERNAL_CALLERS_ONLY;
 
 /*
  * Insert a CD-ROM device. A device corresponding to disk must already
@@ -1845,9 +1870,14 @@ int libxl_device_nic_destroy(libxl_ctx *ctx, uint32_t domid,
                              const libxl_asyncop_how *ao_how)
                              LIBXL_EXTERNAL_CALLERS_ONLY;
 
-libxl_device_nic *libxl_device_nic_list(libxl_ctx *ctx, uint32_t domid, int *num);
+libxl_device_nic *libxl_device_nic_list(libxl_ctx *ctx,
+                                        uint32_t domid, int *num)
+                                        LIBXL_EXTERNAL_CALLERS_ONLY;
+void libxl_device_nic_list_free(libxl_device_nic* list, int num)
+                                LIBXL_EXTERNAL_CALLERS_ONLY;
 int libxl_device_nic_getinfo(libxl_ctx *ctx, uint32_t domid,
-                              libxl_device_nic *nic, libxl_nicinfo *nicinfo);
+                             libxl_device_nic *nic, libxl_nicinfo *nicinfo)
+                             LIBXL_EXTERNAL_CALLERS_ONLY;
 
 /*
  * Virtual Channels
@@ -1873,9 +1903,38 @@ int libxl_device_vtpm_destroy(libxl_ctx *ctx, uint32_t domid,
                               const libxl_asyncop_how *ao_how)
                               LIBXL_EXTERNAL_CALLERS_ONLY;
 
-libxl_device_vtpm *libxl_device_vtpm_list(libxl_ctx *ctx, uint32_t domid, int *num);
+libxl_device_vtpm *libxl_device_vtpm_list(libxl_ctx *ctx,
+                                          uint32_t domid, int *num)
+                                          LIBXL_EXTERNAL_CALLERS_ONLY;
+void libxl_device_vtpm_list_free(libxl_device_vtpm*, int num)
+                                 LIBXL_EXTERNAL_CALLERS_ONLY;
 int libxl_device_vtpm_getinfo(libxl_ctx *ctx, uint32_t domid,
-                               libxl_device_vtpm *vtpm, libxl_vtpminfo *vtpminfo);
+                              libxl_device_vtpm *vtpm, libxl_vtpminfo *vtpminfo)
+                              LIBXL_EXTERNAL_CALLERS_ONLY;
+
+/* Virtual displays */
+int libxl_device_vdispl_add(libxl_ctx *ctx, uint32_t domid,
+                            libxl_device_vdispl *displ,
+                            const libxl_asyncop_how *ao_how)
+                            LIBXL_EXTERNAL_CALLERS_ONLY;
+int libxl_device_vdispl_remove(libxl_ctx *ctx, uint32_t domid,
+                               libxl_device_vdispl *vdispl,
+                               const libxl_asyncop_how *ao_how)
+                               LIBXL_EXTERNAL_CALLERS_ONLY;
+int libxl_device_vdispl_destroy(libxl_ctx *ctx, uint32_t domid,
+                                libxl_device_vdispl *vdispl,
+                                const libxl_asyncop_how *ao_how)
+                                LIBXL_EXTERNAL_CALLERS_ONLY;
+
+libxl_device_vdispl *libxl_device_vdispl_list(libxl_ctx *ctx,
+                                              uint32_t domid, int *num)
+                                              LIBXL_EXTERNAL_CALLERS_ONLY;
+void libxl_device_vdispl_list_free(libxl_device_vdispl* list, int num)
+                                   LIBXL_EXTERNAL_CALLERS_ONLY;
+int libxl_device_vdispl_getinfo(libxl_ctx *ctx, uint32_t domid,
+                                libxl_device_vdispl *vdispl,
+                                libxl_vdisplinfo *vdisplinfo)
+                                LIBXL_EXTERNAL_CALLERS_ONLY;
 
 /* Keyboard */
 int libxl_device_vkb_add(libxl_ctx *ctx, uint32_t domid, libxl_device_vkb *vkb,

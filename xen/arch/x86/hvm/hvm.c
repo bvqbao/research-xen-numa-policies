@@ -1787,7 +1787,7 @@ int hvm_hap_nested_page_fault(paddr_t gpa, unsigned long gla,
             {
                 bool_t sve;
 
-                p2m->get_entry(p2m, gfn, &p2mt, &p2ma, 0, NULL, &sve);
+                p2m->get_entry(p2m, _gfn(gfn), &p2mt, &p2ma, 0, NULL, &sve);
 
                 if ( !sve && altp2m_vcpu_emulate_ve(curr) )
                 {
@@ -2915,9 +2915,9 @@ void hvm_task_switch(
 
     rc = hvm_copy_from_guest_linear(
         &tss, prev_tr.base, sizeof(tss), PFEC_page_present, &pfinfo);
-    if ( rc == HVMCOPY_bad_gva_to_gfn )
+    if ( rc == HVMTRANS_bad_linear_to_gfn )
         hvm_inject_page_fault(pfinfo.ec, pfinfo.linear);
-    if ( rc != HVMCOPY_okay )
+    if ( rc != HVMTRANS_okay )
         goto out;
 
     eflags = regs->eflags;
@@ -2955,20 +2955,20 @@ void hvm_task_switch(
                                   offsetof(typeof(tss), trace) -
                                   offsetof(typeof(tss), eip),
                                   PFEC_page_present, &pfinfo);
-    if ( rc == HVMCOPY_bad_gva_to_gfn )
+    if ( rc == HVMTRANS_bad_linear_to_gfn )
         hvm_inject_page_fault(pfinfo.ec, pfinfo.linear);
-    if ( rc != HVMCOPY_okay )
+    if ( rc != HVMTRANS_okay )
         goto out;
 
     rc = hvm_copy_from_guest_linear(
         &tss, tr.base, sizeof(tss), PFEC_page_present, &pfinfo);
-    if ( rc == HVMCOPY_bad_gva_to_gfn )
+    if ( rc == HVMTRANS_bad_linear_to_gfn )
         hvm_inject_page_fault(pfinfo.ec, pfinfo.linear);
     /*
-     * Note: The HVMCOPY_gfn_shared case could be optimised, if the callee
+     * Note: The HVMTRANS_gfn_shared case could be optimised, if the callee
      * functions knew we want RO access.
      */
-    if ( rc != HVMCOPY_okay )
+    if ( rc != HVMTRANS_okay )
         goto out;
 
     new_cpl = tss.eflags & X86_EFLAGS_VM ? 3 : tss.cs & 3;
@@ -3010,12 +3010,12 @@ void hvm_task_switch(
         rc = hvm_copy_to_guest_linear(tr.base + offsetof(typeof(tss), back_link),
                                       &tss.back_link, sizeof(tss.back_link), 0,
                                       &pfinfo);
-        if ( rc == HVMCOPY_bad_gva_to_gfn )
+        if ( rc == HVMTRANS_bad_linear_to_gfn )
         {
             hvm_inject_page_fault(pfinfo.ec, pfinfo.linear);
             exn_raised = 1;
         }
-        else if ( rc != HVMCOPY_okay )
+        else if ( rc != HVMTRANS_okay )
             goto out;
     }
 
@@ -3051,12 +3051,12 @@ void hvm_task_switch(
         {
             rc = hvm_copy_to_guest_linear(linear_addr, &errcode, opsz, 0,
                                           &pfinfo);
-            if ( rc == HVMCOPY_bad_gva_to_gfn )
+            if ( rc == HVMTRANS_bad_linear_to_gfn )
             {
                 hvm_inject_page_fault(pfinfo.ec, pfinfo.linear);
                 exn_raised = 1;
             }
-            else if ( rc != HVMCOPY_okay )
+            else if ( rc != HVMTRANS_okay )
                 goto out;
         }
     }
@@ -3069,15 +3069,92 @@ void hvm_task_switch(
     hvm_unmap_entry(nptss_desc);
 }
 
+enum hvm_translation_result hvm_translate_get_page(
+    struct vcpu *v, unsigned long addr, bool linear, uint32_t pfec,
+    pagefault_info_t *pfinfo, struct page_info **page_p,
+    gfn_t *gfn_p, p2m_type_t *p2mt_p)
+{
+    struct page_info *page;
+    p2m_type_t p2mt;
+    gfn_t gfn;
+
+    if ( linear )
+    {
+        gfn = _gfn(paging_gva_to_gfn(v, addr, &pfec));
+
+        if ( gfn_eq(gfn, INVALID_GFN) )
+        {
+            if ( pfec & PFEC_page_paged )
+                return HVMTRANS_gfn_paged_out;
+
+            if ( pfec & PFEC_page_shared )
+                return HVMTRANS_gfn_shared;
+
+            if ( pfinfo )
+            {
+                pfinfo->linear = addr;
+                pfinfo->ec = pfec & ~PFEC_implicit;
+            }
+
+            return HVMTRANS_bad_linear_to_gfn;
+        }
+    }
+    else
+    {
+        gfn = gaddr_to_gfn(addr);
+        ASSERT(!pfinfo);
+    }
+
+    /*
+     * No need to do the P2M lookup for internally handled MMIO, benefiting
+     * - 32-bit WinXP (& older Windows) on AMD CPUs for LAPIC accesses,
+     * - newer Windows (like Server 2012) for HPET accesses.
+     */
+    if ( v == current
+         && !nestedhvm_vcpu_in_guestmode(v)
+         && hvm_mmio_internal(gfn_to_gaddr(gfn)) )
+        return HVMTRANS_bad_gfn_to_mfn;
+
+    page = get_page_from_gfn(v->domain, gfn_x(gfn), &p2mt, P2M_UNSHARE);
+
+    if ( !page )
+        return HVMTRANS_bad_gfn_to_mfn;
+
+    if ( p2m_is_paging(p2mt) )
+    {
+        put_page(page);
+        p2m_mem_paging_populate(v->domain, gfn_x(gfn));
+        return HVMTRANS_gfn_paged_out;
+    }
+    if ( p2m_is_shared(p2mt) )
+    {
+        put_page(page);
+        return HVMTRANS_gfn_shared;
+    }
+    if ( p2m_is_grant(p2mt) )
+    {
+        put_page(page);
+        return HVMTRANS_unhandleable;
+    }
+
+    *page_p = page;
+    if ( gfn_p )
+        *gfn_p = gfn;
+    if ( p2mt_p )
+        *p2mt_p = p2mt;
+
+    return HVMTRANS_okay;
+}
+
 #define HVMCOPY_from_guest (0u<<0)
 #define HVMCOPY_to_guest   (1u<<0)
 #define HVMCOPY_phys       (0u<<2)
 #define HVMCOPY_linear     (1u<<2)
-static enum hvm_copy_result __hvm_copy(
+static enum hvm_translation_result __hvm_copy(
     void *buf, paddr_t addr, int size, struct vcpu *v, unsigned int flags,
     uint32_t pfec, pagefault_info_t *pfinfo)
 {
-    unsigned long gfn;
+    gfn_t gfn;
     struct page_info *page;
     p2m_type_t p2mt;
     char *p;
@@ -3098,70 +3175,20 @@ static enum hvm_copy_result __hvm_copy(
      * Hence we bail immediately if called from atomic context.
      */
     if ( in_atomic() )
-        return HVMCOPY_unhandleable;
+        return HVMTRANS_unhandleable;
 #endif
 
     while ( todo > 0 )
     {
+        enum hvm_translation_result res;
         paddr_t gpa = addr & ~PAGE_MASK;
 
         count = min_t(int, PAGE_SIZE - gpa, todo);
 
-        if ( flags & HVMCOPY_linear )
-        {
-            gfn = paging_gva_to_gfn(v, addr, &pfec);
-            if ( gfn == gfn_x(INVALID_GFN) )
-            {
-                if ( pfec & PFEC_page_paged )
-                    return HVMCOPY_gfn_paged_out;
-                if ( pfec & PFEC_page_shared )
-                    return HVMCOPY_gfn_shared;
-                if ( pfinfo )
-                {
-                    pfinfo->linear = addr;
-                    pfinfo->ec = pfec & ~PFEC_implicit;
-                }
-                return HVMCOPY_bad_gva_to_gfn;
-            }
-            gpa |= (paddr_t)gfn << PAGE_SHIFT;
-        }
-        else
-        {
-            gfn = addr >> PAGE_SHIFT;
-            gpa = addr;
-        }
-
-        /*
-         * No need to do the P2M lookup for internally handled MMIO, benefiting
-         * - 32-bit WinXP (& older Windows) on AMD CPUs for LAPIC accesses,
-         * - newer Windows (like Server 2012) for HPET accesses.
-         */
-        if ( v == current
-             && !nestedhvm_vcpu_in_guestmode(v)
-             && hvm_mmio_internal(gpa) )
-            return HVMCOPY_bad_gfn_to_mfn;
-
-        page = get_page_from_gfn(v->domain, gfn, &p2mt, P2M_UNSHARE);
-
-        if ( !page )
-            return HVMCOPY_bad_gfn_to_mfn;
-
-        if ( p2m_is_paging(p2mt) )
-        {
-            put_page(page);
-            p2m_mem_paging_populate(v->domain, gfn);
-            return HVMCOPY_gfn_paged_out;
-        }
-        if ( p2m_is_shared(p2mt) )
-        {
-            put_page(page);
-            return HVMCOPY_gfn_shared;
-        }
-        if ( p2m_is_grant(p2mt) )
-        {
-            put_page(page);
-            return HVMCOPY_unhandleable;
-        }
+        res = hvm_translate_get_page(v, addr, flags & HVMCOPY_linear,
+                                     pfec, pfinfo, &page, &gfn, &p2mt);
+        if ( res != HVMTRANS_okay )
+            return res;
 
         p = (char *)__map_domain_page(page) + (addr & ~PAGE_MASK);
 
@@ -3170,10 +3197,11 @@ static enum hvm_copy_result __hvm_copy(
             if ( p2m_is_discard_write(p2mt) )
             {
                 static unsigned long lastpage;
-                if ( xchg(&lastpage, gfn) != gfn )
+
+                if ( xchg(&lastpage, gfn_x(gfn)) != gfn_x(gfn) )
                     dprintk(XENLOG_G_DEBUG,
                             "%pv attempted write to read-only gfn %#lx (mfn=%#lx)\n",
-                            v, gfn, page_to_mfn(page));
+                            v, gfn_x(gfn), page_to_mfn(page));
             }
             else
             {
@@ -3198,24 +3226,24 @@ static enum hvm_copy_result __hvm_copy(
         put_page(page);
     }
 
-    return HVMCOPY_okay;
+    return HVMTRANS_okay;
 }
 
-enum hvm_copy_result hvm_copy_to_guest_phys(
+enum hvm_translation_result hvm_copy_to_guest_phys(
     paddr_t paddr, void *buf, int size, struct vcpu *v)
 {
     return __hvm_copy(buf, paddr, size, v,
                       HVMCOPY_to_guest | HVMCOPY_phys, 0, NULL);
 }
 
-enum hvm_copy_result hvm_copy_from_guest_phys(
+enum hvm_translation_result hvm_copy_from_guest_phys(
     void *buf, paddr_t paddr, int size)
 {
     return __hvm_copy(buf, paddr, size, current,
                       HVMCOPY_from_guest | HVMCOPY_phys, 0, NULL);
 }
 
-enum hvm_copy_result hvm_copy_to_guest_linear(
+enum hvm_translation_result hvm_copy_to_guest_linear(
     unsigned long addr, void *buf, int size, uint32_t pfec,
     pagefault_info_t *pfinfo)
 {
@@ -3224,7 +3252,7 @@ enum hvm_copy_result hvm_copy_to_guest_linear(
                       PFEC_page_present | PFEC_write_access | pfec, pfinfo);
 }
 
-enum hvm_copy_result hvm_copy_from_guest_linear(
+enum hvm_translation_result hvm_copy_from_guest_linear(
     void *buf, unsigned long addr, int size, uint32_t pfec,
     pagefault_info_t *pfinfo)
 {
@@ -3233,7 +3261,7 @@ enum hvm_copy_result hvm_copy_from_guest_linear(
                       PFEC_page_present | pfec, pfinfo);
 }
 
-enum hvm_copy_result hvm_fetch_from_guest_linear(
+enum hvm_translation_result hvm_fetch_from_guest_linear(
     void *buf, unsigned long addr, int size, uint32_t pfec,
     pagefault_info_t *pfinfo)
 {
@@ -3286,7 +3314,9 @@ unsigned long copy_from_user_hvm(void *to, const void *from, unsigned len)
 
 bool hvm_check_cpuid_faulting(struct vcpu *v)
 {
-    if ( !v->arch.cpuid_faulting )
+    const struct msr_vcpu_policy *vp = v->arch.msr;
+
+    if ( !vp->misc_features_enables.cpuid_faulting )
         return false;
 
     return hvm_get_cpl(v) > 0;
@@ -3332,10 +3362,15 @@ int hvm_msr_read_intercept(unsigned int msr, uint64_t *msr_content)
     struct vcpu *v = current;
     struct domain *d = v->domain;
     uint64_t *var_range_base, *fixed_range_base;
-    int ret = X86EMUL_OKAY;
+    int ret;
 
     var_range_base = (uint64_t *)v->arch.hvm_vcpu.mtrr.var_ranges;
     fixed_range_base = (uint64_t *)v->arch.hvm_vcpu.mtrr.fixed_ranges;
+
+    if ( (ret = guest_rdmsr(v, msr, msr_content)) != X86EMUL_UNHANDLEABLE )
+        return ret;
+
+    ret = X86EMUL_OKAY;
 
     switch ( msr )
     {
@@ -3458,7 +3493,7 @@ int hvm_msr_write_intercept(unsigned int msr, uint64_t msr_content,
 {
     struct vcpu *v = current;
     struct domain *d = v->domain;
-    int ret = X86EMUL_OKAY;
+    int ret;
 
     HVMTRACE_3D(MSR_WRITE, msr,
                (uint32_t)msr_content, (uint32_t)(msr_content >> 32));
@@ -3475,6 +3510,11 @@ int hvm_msr_write_intercept(unsigned int msr, uint64_t msr_content,
         hvm_monitor_msr(msr, msr_content);
         return X86EMUL_OKAY;
     }
+
+    if ( (ret = guest_wrmsr(v, msr, msr_content)) != X86EMUL_UNHANDLEABLE )
+        return ret;
+
+    ret = X86EMUL_OKAY;
 
     switch ( msr )
     {
@@ -3670,7 +3710,7 @@ void hvm_ud_intercept(struct cpu_user_regs *regs)
                                         sizeof(sig), hvm_access_insn_fetch,
                                         cs, &addr) &&
              (hvm_fetch_from_guest_linear(sig, addr, sizeof(sig),
-                                          walk, NULL) == HVMCOPY_okay) &&
+                                          walk, NULL) == HVMTRANS_okay) &&
              (memcmp(sig, "\xf\xbxen", sizeof(sig)) == 0) )
         {
             regs->rip += sizeof(sig);
@@ -3695,6 +3735,7 @@ void hvm_ud_intercept(struct cpu_user_regs *regs)
     switch ( hvm_emulate_one(&ctxt) )
     {
     case X86EMUL_UNHANDLEABLE:
+    case X86EMUL_UNIMPLEMENTED:
         hvm_inject_hw_exception(TRAP_invalid_op, X86_EVENT_NO_EC);
         break;
     case X86EMUL_EXCEPTION:
@@ -4185,20 +4226,20 @@ static int hvmop_set_param(
             rc = -EINVAL;
         break;
     case HVM_PARAM_IOREQ_SERVER_PFN:
-        d->arch.hvm_domain.ioreq_gmfn.base = a.value;
+        d->arch.hvm_domain.ioreq_gfn.base = a.value;
         break;
     case HVM_PARAM_NR_IOREQ_SERVER_PAGES:
     {
         unsigned int i;
 
         if ( a.value == 0 ||
-             a.value > sizeof(d->arch.hvm_domain.ioreq_gmfn.mask) * 8 )
+             a.value > sizeof(d->arch.hvm_domain.ioreq_gfn.mask) * 8 )
         {
             rc = -EINVAL;
             break;
         }
         for ( i = 0; i < a.value; i++ )
-            set_bit(i, &d->arch.hvm_domain.ioreq_gmfn.mask);
+            set_bit(i, &d->arch.hvm_domain.ioreq_gfn.mask);
 
         break;
     }
@@ -4361,7 +4402,7 @@ static int hvmop_get_param(
         {
             domid_t domid = d->arch.hvm_domain.params[HVM_PARAM_DM_DOMAIN];
 
-            rc = hvm_create_ioreq_server(d, domid, 1,
+            rc = hvm_create_ioreq_server(d, domid, true,
                                          HVM_IOREQSRV_BUFIOREQ_LEGACY, NULL);
             if ( rc != 0 && rc != -EEXIST )
                 goto out;

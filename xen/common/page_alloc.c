@@ -192,7 +192,11 @@ PAGE_LIST_HEAD(page_broken_list);
  * BOOT-TIME ALLOCATOR
  */
 
-static unsigned long __initdata first_valid_mfn = ~0UL;
+/*
+ * first_valid_mfn is exported because it is use in ARM specific NUMA
+ * helpers. See comment in asm-arm/numa.h.
+ */
+unsigned long first_valid_mfn = ~0UL;
 
 static struct bootmem_region {
     unsigned long s, e; /* MFNs @s through @e-1 inclusive are free */
@@ -325,8 +329,7 @@ void __init init_boot_pages(paddr_t ps, paddr_t pe)
     }
 }
 
-unsigned long __init alloc_boot_pages(
-    unsigned long nr_pfns, unsigned long pfn_align)
+mfn_t __init alloc_boot_pages(unsigned long nr_pfns, unsigned long pfn_align)
 {
     unsigned long pg, _e;
     unsigned int i = nr_bootmem_regions;
@@ -355,14 +358,14 @@ unsigned long __init alloc_boot_pages(
             if ( pg + nr_pfns > PFN_DOWN(highmem_start) )
                 continue;
             r->s = pg + nr_pfns;
-            return pg;
+            return _mfn(pg);
         }
 #endif
 
         _e = r->e;
         r->e = pg;
         bootmem_region_add(pg + nr_pfns, _e);
-        return pg;
+        return _mfn(pg);
     }
 
     BUG();
@@ -1701,6 +1704,16 @@ static void init_heap_pages(
 {
     unsigned long i;
 
+    /*
+     * Some pages may not go through the boot allocator (e.g reserved
+     * memory at boot but released just after --- kernel, initramfs,
+     * etc.).
+     * Update first_valid_mfn to ensure those regions are covered.
+     */
+    spin_lock(&heap_lock);
+    first_valid_mfn = min_t(unsigned long, page_to_mfn(pg), first_valid_mfn);
+    spin_unlock(&heap_lock);
+
     for ( i = 0; i < nr_pages; i++ )
     {
         unsigned int nid = phys_to_nid(page_to_maddr(pg+i));
@@ -2227,7 +2240,7 @@ struct page_info *alloc_domheap_pages(
     if ( d && !(memflags & MEMF_no_owner) &&
          assign_pages(d, pg, order, memflags) )
     {
-        free_heap_pages(pg, order, false);
+        free_heap_pages(pg, order, memflags & MEMF_no_scrub);
         return NULL;
     }
     

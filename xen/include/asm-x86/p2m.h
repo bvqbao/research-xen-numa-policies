@@ -234,13 +234,13 @@ struct p2m_domain {
     struct page_list_head pages;
 
     int                (*set_entry)(struct p2m_domain *p2m,
-                                    unsigned long gfn,
+                                    gfn_t gfn,
                                     mfn_t mfn, unsigned int page_order,
                                     p2m_type_t p2mt,
                                     p2m_access_t p2ma,
                                     int sve);
     mfn_t              (*get_entry)(struct p2m_domain *p2m,
-                                    unsigned long gfn,
+                                    gfn_t gfn,
                                     p2m_type_t *p2mt,
                                     p2m_access_t *p2ma,
                                     p2m_query_t q,
@@ -316,8 +316,8 @@ struct p2m_domain {
                          single;       /* Non-super lists                   */
         long             count,        /* # of pages in cache lists         */
                          entry_count;  /* # of pages in p2m marked pod      */
-        unsigned long    reclaim_single; /* Last gpfn of a scan */
-        unsigned long    max_guest;    /* gpfn of max guest demand-populate */
+        gfn_t            reclaim_single; /* Last gfn of a scan */
+        gfn_t            max_guest;    /* gfn of max guest demand-populate */
 
         /*
          * Tracking of the most recently populated PoD pages, for eager
@@ -643,13 +643,6 @@ int p2m_pod_empty_cache(struct domain *d);
  * domain matches target */
 int p2m_pod_set_mem_target(struct domain *d, unsigned long target);
 
-/* Call when decreasing memory reservation to handle PoD entries properly.
- * Will return '1' if all entries were handled and nothing more need be done.*/
-int
-p2m_pod_decrease_reservation(struct domain *d,
-                             xen_pfn_t gpfn,
-                             unsigned int order);
-
 /* Scan pod cache when offline/broken page triggered */
 int
 p2m_pod_offline_or_broken_hit(struct page_info *p);
@@ -689,7 +682,7 @@ void p2m_free_ptp(struct p2m_domain *p2m, struct page_info *pg);
 
 /* Directly set a p2m entry: only for use by p2m code. Does not need
  * a call to put_gfn afterwards/ */
-int p2m_set_entry(struct p2m_domain *p2m, unsigned long gfn, mfn_t mfn,
+int p2m_set_entry(struct p2m_domain *p2m, gfn_t gfn, mfn_t mfn,
                   unsigned int page_order, p2m_type_t p2mt, p2m_access_t p2ma);
 
 /* Set up function pointers for PT implementation: only for use by p2m code */
@@ -726,10 +719,8 @@ extern void audit_p2m(struct domain *d,
 #endif
 
 /* Called by p2m code when demand-populating a PoD page */
-int
-p2m_pod_demand_populate(struct p2m_domain *p2m, unsigned long gfn,
-                        unsigned int order,
-                        p2m_query_t q);
+bool
+p2m_pod_demand_populate(struct p2m_domain *p2m, gfn_t gfn, unsigned int order);
 
 /*
  * Functions specific to the p2m-pt implementation

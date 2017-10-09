@@ -1,8 +1,6 @@
 #ifndef __ASM_ARM_PROCESSOR_H
 #define __ASM_ARM_PROCESSOR_H
 
-#include <asm/cpregs.h>
-#include <asm/sysregs.h>
 #ifndef __ASSEMBLY__
 #include <xen/types.h>
 #endif
@@ -583,11 +581,12 @@ union hsr {
 
     struct hsr_iabt {
         unsigned long ifsc:6;  /* Instruction fault status code */
-        unsigned long res0:1;
+        unsigned long res0:1;  /* RES0 */
         unsigned long s1ptw:1; /* Stage 2 fault during stage 1 translation */
-        unsigned long res1:1;
+        unsigned long res1:1;  /* RES0 */
         unsigned long eat:1;   /* External abort type */
-        unsigned long res2:15;
+        unsigned long fnv:1;   /* FAR not Valid */
+        unsigned long res2:14;
         unsigned long len:1;   /* Instruction length */
         unsigned long ec:6;    /* Exception Class */
     } iabt; /* HSR_EC_INSTR_ABORT_* */
@@ -598,10 +597,11 @@ union hsr {
         unsigned long s1ptw:1; /* Stage 2 fault during stage 1 translation */
         unsigned long cache:1; /* Cache Maintenance */
         unsigned long eat:1;   /* External Abort Type */
+        unsigned long fnv:1;   /* FAR not Valid */
 #ifdef CONFIG_ARM_32
-        unsigned long sbzp0:6;
+        unsigned long sbzp0:5;
 #else
-        unsigned long sbzp0:4;
+        unsigned long sbzp0:3;
         unsigned long ar:1;    /* Acquire Release */
         unsigned long sf:1;    /* Sixty Four bit register */
 #endif
@@ -612,6 +612,19 @@ union hsr {
         unsigned long len:1;   /* Instruction length */
         unsigned long ec:6;    /* Exception Class */
     } dabt; /* HSR_EC_DATA_ABORT_* */
+
+    /* Contain the common bits between DABT and IABT */
+    struct hsr_xabt {
+        unsigned long fsc:6;    /* Fault status code */
+        unsigned long pad1:1;   /* Not common */
+        unsigned long s1ptw:1;  /* Stage 2 fault during stage 1 translation */
+        unsigned long pad2:1;   /* Not common */
+        unsigned long eat:1;    /* External abort type */
+        unsigned long fnv:1;    /* FAR not Valid */
+        unsigned long pad3:14;  /* Not common */
+        unsigned long len:1;    /* Instruction length */
+        unsigned long ec:6;     /* Exception Class */
+    } xabt;
 
 #ifdef CONFIG_ARM_64
     struct hsr_brk {

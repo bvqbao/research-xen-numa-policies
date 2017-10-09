@@ -479,12 +479,13 @@ int p2m_pt_handle_deferred_changes(uint64_t gpa)
 
 /* Returns: 0 for success, -errno for failure */
 static int
-p2m_pt_set_entry(struct p2m_domain *p2m, unsigned long gfn, mfn_t mfn,
+p2m_pt_set_entry(struct p2m_domain *p2m, gfn_t gfn_, mfn_t mfn,
                  unsigned int page_order, p2m_type_t p2mt, p2m_access_t p2ma,
                  int sve)
 {
     /* XXX -- this might be able to be faster iff current->domain == d */
     void *table;
+    unsigned long gfn = gfn_x(gfn_);
     unsigned long i, gfn_remainder = gfn;
     l1_pgentry_t *p2m_entry, entry_content;
     /* Intermediate table to free if we're replacing it with a superpage. */
@@ -731,11 +732,12 @@ p2m_pt_set_entry(struct p2m_domain *p2m, unsigned long gfn, mfn_t mfn,
 }
 
 static mfn_t
-p2m_pt_get_entry(struct p2m_domain *p2m, unsigned long gfn,
+p2m_pt_get_entry(struct p2m_domain *p2m, gfn_t gfn_,
                  p2m_type_t *t, p2m_access_t *a, p2m_query_t q,
                  unsigned int *page_order, bool_t *sve)
 {
     mfn_t mfn;
+    unsigned long gfn = gfn_x(gfn_);
     paddr_t addr = ((paddr_t)gfn) << PAGE_SHIFT;
     l2_pgentry_t *l2e;
     l1_pgentry_t *l1e;
@@ -800,7 +802,7 @@ pod_retry_l3:
             {
                 if ( q & P2M_ALLOC )
                 {
-                    if ( !p2m_pod_demand_populate(p2m, gfn, PAGE_ORDER_1G, q) )
+                    if ( p2m_pod_demand_populate(p2m, gfn_, PAGE_ORDER_1G) )
                         goto pod_retry_l3;
                     gdprintk(XENLOG_ERR, "%s: Allocate 1GB failed!\n", __func__);
                 }
@@ -842,7 +844,7 @@ pod_retry_l2:
         if ( p2m_flags_to_type(flags) == p2m_populate_on_demand )
         {
             if ( q & P2M_ALLOC ) {
-                if ( !p2m_pod_demand_populate(p2m, gfn, PAGE_ORDER_2M, q) )
+                if ( p2m_pod_demand_populate(p2m, gfn_, PAGE_ORDER_2M) )
                     goto pod_retry_l2;
             } else
                 *t = p2m_populate_on_demand;
@@ -881,7 +883,7 @@ pod_retry_l1:
         if ( l1t == p2m_populate_on_demand )
         {
             if ( q & P2M_ALLOC ) {
-                if ( !p2m_pod_demand_populate(p2m, gfn, PAGE_ORDER_4K, q) )
+                if ( p2m_pod_demand_populate(p2m, gfn_, PAGE_ORDER_4K) )
                     goto pod_retry_l1;
             } else
                 *t = p2m_populate_on_demand;

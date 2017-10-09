@@ -27,7 +27,7 @@
 #include <asm/platform.h>
 #include <asm/io.h>
 
-static bool_t secure_firmware;
+static bool secure_firmware;
 
 #define EXYNOS_ARM_CORE0_CONFIG     0x2000
 #define EXYNOS_ARM_CORE_CONFIG(_nr) (EXYNOS_ARM_CORE0_CONFIG + (0x80 * (_nr)))
@@ -62,7 +62,7 @@ static int exynos5_init_time(void)
     dprintk(XENLOG_INFO, "mct_base_addr: %016llx size: %016llx\n",
             mct_base_addr, size);
 
-    mct = ioremap_attr(mct_base_addr, size, PAGE_HYPERVISOR_NOCACHE);
+    mct = ioremap_nocache(mct_base_addr, size);
     if ( !mct )
     {
         dprintk(XENLOG_ERR, "Unable to map MCT\n");
@@ -108,7 +108,7 @@ static int __init exynos5_smp_init(void)
         /* Have to use sysram_ns_base_addr + 0x1c for boot address */
         compatible = "samsung,exynos4210-sysram-ns";
         sysram_offset = 0x1c;
-        secure_firmware = 1;
+        secure_firmware = true;
         printk("Running under secure firmware.\n");
     }
     else

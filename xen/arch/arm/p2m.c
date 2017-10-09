@@ -393,8 +393,7 @@ int guest_physmap_mark_populate_on_demand(struct domain *d,
     return -ENOSYS;
 }
 
-int p2m_pod_decrease_reservation(struct domain *d,
-                                 xen_pfn_t gpfn,
+int p2m_pod_decrease_reservation(struct domain *d, gfn_t gfn,
                                  unsigned int order)
 {
     return -ENOSYS;
@@ -1219,6 +1218,10 @@ void p2m_teardown(struct domain *d)
     struct p2m_domain *p2m = p2m_get_hostp2m(d);
     struct page_info *pg;
 
+    /* p2m not actually initialized */
+    if ( !p2m->domain )
+        return;
+
     while ( (pg = page_list_remove_head(&p2m->pages)) )
         free_domheap_page(pg);
 
@@ -1230,6 +1233,8 @@ void p2m_teardown(struct domain *d)
     p2m_free_vmid(d);
 
     radix_tree_destroy(&p2m->mem_access_settings, NULL);
+
+    p2m->domain = NULL;
 }
 
 int p2m_init(struct domain *d)
@@ -1247,7 +1252,6 @@ int p2m_init(struct domain *d)
     if ( rc != 0 )
         return rc;
 
-    p2m->domain = d;
     p2m->max_mapped_gfn = _gfn(0);
     p2m->lowest_mapped_gfn = _gfn(ULONG_MAX);
 
@@ -1275,6 +1279,13 @@ int p2m_init(struct domain *d)
 
     for_each_possible_cpu(cpu)
        p2m->last_vcpu_ran[cpu] = INVALID_VCPU_ID;
+
+    /*
+     * Besides getting a domain when we only have the p2m in hand,
+     * the back pointer to domain is also used in p2m_teardown()
+     * as an end-of-initialization indicator.
+     */
+    p2m->domain = d;
 
     return rc;
 }

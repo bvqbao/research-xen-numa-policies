@@ -178,11 +178,9 @@ static int modified_memory(struct domain *d,
         struct xen_dm_op_modified_memory_extent extent;
         unsigned int batch_nr;
         xen_pfn_t pfn, end_pfn;
-        int rc;
 
-        rc = COPY_FROM_GUEST_BUF_OFFSET(extent,
-            bufs, EXTENTS_BUFFER, (*rem_extents - 1) * sizeof(extent));
-        if ( rc )
+        if ( !COPY_FROM_GUEST_BUF_OFFSET(extent, bufs, EXTENTS_BUFFER,
+                                         (*rem_extents - 1) * sizeof(extent)) )
             return -EFAULT;
 
         if ( extent.pad )
@@ -409,7 +407,7 @@ static int dm_op(const struct dmop_args *op_args)
         if ( data->pad[0] || data->pad[1] || data->pad[2] )
             break;
 
-        rc = hvm_create_ioreq_server(d, curr_d->domain_id, 0,
+        rc = hvm_create_ioreq_server(d, curr_d->domain_id, false,
                                      data->handle_bufioreq, &data->id);
         break;
     }
@@ -426,8 +424,8 @@ static int dm_op(const struct dmop_args *op_args)
             break;
 
         rc = hvm_get_ioreq_server_info(d, data->id,
-                                       &data->ioreq_pfn,
-                                       &data->bufioreq_pfn,
+                                       &data->ioreq_gfn,
+                                       &data->bufioreq_gfn,
                                        &data->bufioreq_port);
         break;
     }

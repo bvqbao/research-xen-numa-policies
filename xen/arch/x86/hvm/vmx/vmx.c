@@ -2723,39 +2723,49 @@ static const struct lbr_info *last_branch_msr_get(void)
         switch ( boot_cpu_data.x86_model )
         {
         /* Core2 Duo */
-        case 15:
+        case 0x0f:
         /* Enhanced Core */
-        case 23:
+        case 0x17:
+        /* Xeon 7400 */
+        case 0x1d:
             return c2_lbr;
         /* Nehalem */
-        case 26: case 30: case 31: case 46:
+        case 0x1a: case 0x1e: case 0x1f: case 0x2e:
         /* Westmere */
-        case 37: case 44: case 47:
+        case 0x25: case 0x2c: case 0x2f:
         /* Sandy Bridge */
-        case 42: case 45:
+        case 0x2a: case 0x2d:
         /* Ivy Bridge */
-        case 58: case 62:
+        case 0x3a: case 0x3e:
         /* Haswell */
-        case 60: case 63: case 69: case 70:
+        case 0x3c: case 0x3f: case 0x45: case 0x46:
         /* Broadwell */
-        case 61: case 71: case 79: case 86:
+        case 0x3d: case 0x47: case 0x4f: case 0x56:
             return nh_lbr;
         /* Skylake */
-        case 78: case 94:
-        /* future */
-        case 142: case 158:
+        case 0x4e: case 0x5e:
+        /* Xeon Scalable */
+        case 0x55:
+        /* Cannon Lake */
+        case 0x66:
+        /* Goldmont Plus */
+        case 0x7a:
+        /* Kaby Lake */
+        case 0x8e: case 0x9e:
             return sk_lbr;
         /* Atom */
-        case 28: case 38: case 39: case 53: case 54:
+        case 0x1c: case 0x26: case 0x27: case 0x35: case 0x36:
         /* Silvermont */
-        case 55: case 74: case 77: case 90: case 93:
-        /* next gen Xeon Phi */
-        case 87:
+        case 0x37: case 0x4a: case 0x4d: case 0x5a: case 0x5d:
+        /* Xeon Phi Knights Landing */
+        case 0x57:
+        /* Xeon Phi Knights Mill */
+        case 0x85:
         /* Airmont */
-        case 76:
+        case 0x4c:
             return at_lbr;
         /* Goldmont */
-        case 92: case 95:
+        case 0x5c: case 0x5f:
             return gm_lbr;
         }
         break;
@@ -2782,6 +2792,7 @@ enum
     LBR_FORMAT_EIP_FLAGS_TSX      = 0x4, /* 64-bit EIP, Flags, TSX */
     LBR_FORMAT_EIP_FLAGS_TSX_INFO = 0x5, /* 64-bit EIP, Flags, TSX, LBR_INFO */
     LBR_FORMAT_EIP_FLAGS_CYCLES   = 0x6, /* 64-bit EIP, Flags, Cycles */
+    LBR_FORMAT_LIP_FLAGS_TSX_INFO = 0x7, /* 64-bit LIP, Flags, TSX, LBR_INFO */
 };
 
 #define LBR_FROM_SIGNEXT_2MSB  ((1ULL << 59) | (1ULL << 60))
@@ -2894,16 +2905,6 @@ static int vmx_msr_read_intercept(unsigned int msr, uint64_t *msr_content)
     case MSR_IA32_DS_AREA:
         if ( vpmu_do_rdmsr(msr, msr_content) )
             goto gp_fault;
-        break;
-
-    case MSR_INTEL_PLATFORM_INFO:
-        *msr_content = MSR_PLATFORM_INFO_CPUID_FAULTING;
-        break;
-
-    case MSR_INTEL_MISC_FEATURES_ENABLES:
-        *msr_content = 0;
-        if ( current->arch.cpuid_faulting )
-            *msr_content |= MSR_MISC_FEATURES_CPUID_FAULTING;
         break;
 
     default:
@@ -3125,27 +3126,6 @@ static int vmx_msr_write_intercept(unsigned int msr, uint64_t msr_content)
          if ( vpmu_do_wrmsr(msr, msr_content, 0) )
             goto gp_fault;
         break;
-
-    case MSR_INTEL_PLATFORM_INFO:
-        if ( msr_content ||
-             rdmsr_safe(MSR_INTEL_PLATFORM_INFO, msr_content) )
-            goto gp_fault;
-        break;
-
-    case MSR_INTEL_MISC_FEATURES_ENABLES:
-    {
-        bool old_cpuid_faulting = v->arch.cpuid_faulting;
-
-        if ( msr_content & ~MSR_MISC_FEATURES_CPUID_FAULTING )
-            goto gp_fault;
-
-        v->arch.cpuid_faulting = msr_content & MSR_MISC_FEATURES_CPUID_FAULTING;
-
-        if ( cpu_has_cpuid_faulting &&
-             (old_cpuid_faulting ^ v->arch.cpuid_faulting) )
-            ctxt_switch_levelling(v);
-        break;
-    }
 
     default:
         if ( passive_domain_do_wrmsr(msr, msr_content) )

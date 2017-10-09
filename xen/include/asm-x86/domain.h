@@ -356,8 +356,9 @@ struct arch_domain
      */
     uint8_t x87_fip_width;
 
-    /* CPUID Policy. */
+    /* CPUID and MSR policy objects. */
     struct cpuid_policy *cpuid;
+    struct msr_domain_policy *msr;
 
     struct PITState vpit;
 
@@ -406,6 +407,7 @@ struct arch_domain
         unsigned int cpuid_enabled                                         : 1;
         unsigned int descriptor_access_enabled                             : 1;
         unsigned int guest_request_userspace_enabled                       : 1;
+        unsigned int emul_unimplemented_enabled                            : 1;
         struct monitor_msr_bitmap *msr_bitmap;
         uint64_t write_ctrlreg_mask[4];
     } monitor;
@@ -556,9 +558,6 @@ struct arch_vcpu
      * and thus should be saved/restored. */
     bool_t nonlazy_xstate_used;
 
-    /* Has the guest enabled CPUID faulting? */
-    bool cpuid_faulting;
-
     /*
      * The SMAP check policy when updating runstate_guest(v) and the
      * secondary system time.
@@ -575,6 +574,8 @@ struct arch_vcpu
     XEN_GUEST_HANDLE(vcpu_time_info_t) time_info_guest;
 
     struct arch_vm_event *vm_event;
+
+    struct msr_vcpu_policy *msr;
 
     struct {
         bool next_interrupt_enabled;

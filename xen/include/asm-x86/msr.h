@@ -202,6 +202,39 @@ void write_efer(u64 val);
 
 DECLARE_PER_CPU(u32, ler_msr);
 
+/* MSR policy object for shared per-domain MSRs */
+struct msr_domain_policy
+{
+    /* 0x000000ce  MSR_INTEL_PLATFORM_INFO */
+    struct {
+        bool available; /* This MSR is non-architectural */
+        bool cpuid_faulting;
+    } plaform_info;
+};
+
+/* MSR policy object for per-vCPU MSRs */
+struct msr_vcpu_policy
+{
+    /* 0x00000140  MSR_INTEL_MISC_FEATURES_ENABLES */
+    struct {
+        bool available; /* This MSR is non-architectural */
+        bool cpuid_faulting;
+    } misc_features_enables;
+};
+
+void init_guest_msr_policy(void);
+int init_domain_msr_policy(struct domain *d);
+int init_vcpu_msr_policy(struct vcpu *v);
+
+/*
+ * Below functions can return X86EMUL_UNHANDLEABLE which means that MSR is
+ * not (yet) handled by it and must be processed by legacy handlers. Such
+ * behaviour is needed for transition period until all rd/wrmsr are handled
+ * by the new MSR infrastructure.
+ */
+int guest_rdmsr(const struct vcpu *v, uint32_t msr, uint64_t *val);
+int guest_wrmsr(struct vcpu *v, uint32_t msr, uint64_t val);
+
 #endif /* !__ASSEMBLY__ */
 
 #endif /* __ASM_MSR_H */

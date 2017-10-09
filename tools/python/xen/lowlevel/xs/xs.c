@@ -77,6 +77,8 @@ static inline struct xs_handle *xshandle(XsHandle *self)
 
 static void remove_watch(XsHandle *xsh, PyObject *token);
 
+static PyObject *match_watch_by_token(XsHandle *self, char **xsval);
+
 static PyObject *none(bool result);
 
 static int parse_transaction_path(XsHandle *self, PyObject *args,
@@ -453,6 +455,52 @@ static PyObject *xspy_watch(XsHandle *self, PyObject *args)
 }
 
 
+#define xspy_fileno_doc "\n"                              \
+	"Return the FD to poll for notifications when watches fire.\n"   \
+	"Returns: [int] file descriptor.\n"                \
+	"\n"
+
+static PyObject *xspy_fileno(XsHandle *self)
+{
+    struct xs_handle *xh = xshandle(self);
+    int fd;
+
+    if (!xh)
+        return NULL;
+
+    fd = xs_fileno(xh);
+
+    return PyLong_FromLong(fd);
+}
+
+
+#define xspy_check_watch_doc "\n"				\
+	"Check for watch notifications without blocking.\n"	\
+	"\n"							\
+	"Returns: [tuple] (path, token).\n"			\
+	"         None if no watches have fired.\n"             \
+	"Raises xen.lowlevel.xs.Error on error.\n"	        \
+	"\n"
+
+static PyObject *xspy_check_watch(XsHandle *self, PyObject *args)
+{
+    struct xs_handle *xh = xshandle(self);
+    PyObject *val = NULL;
+    char **xsval;
+
+    if (!xh)
+        return NULL;
+
+    xsval = xs_check_watch(xh);
+    if (!xsval) {
+        return none(errno == EAGAIN);
+    }
+
+    val = match_watch_by_token(self, xsval);
+    free(xsval);
+    return val;
+}
+
 #define xspy_read_watch_doc "\n"				\
 	"Read a watch notification.\n"				\
 	"\n"							\
@@ -465,8 +513,6 @@ static PyObject *xspy_read_watch(XsHandle *self, PyObject *args)
     struct xs_handle *xh = xshandle(self);
     PyObject *val = NULL;
     char **xsval;
-    PyObject *token;
-    int i;
     unsigned int num;
 
     if (!xh)
@@ -478,29 +524,16 @@ again:
     Py_END_ALLOW_THREADS
     if (!xsval) {
         PyErr_SetFromErrno(xs_error);
-        goto exit;
+        return val;
     }
-    if (sscanf(xsval[XS_WATCH_TOKEN], "%li", (unsigned long *)&token) != 1) {
-	xs_set_error(EINVAL);
-        goto exit;
-    }
-    for (i = 0; i < PyList_Size(self->watches); i++) {
-        if (token == PyList_GetItem(self->watches, i))
-            break;
-    }
-    if (i == PyList_Size(self->watches)) {
-      /* We do not have a registered watch for the one that has just fired.
-         Ignore this -- a watch that has been recently deregistered can still
-         have watches in transit.  This is a blocking method, so go back to
-         read again.
-      */
-      free(xsval);
-      goto again;
-    }
-    /* Create tuple (path, token). */
-    val = Py_BuildValue("(sO)", xsval[XS_WATCH_PATH], token);
- exit:
+
+    val = match_watch_by_token(self, xsval);
     free(xsval);
+
+    if (!val && errno == EAGAIN) {
+        goto again;
+    }
+
     return val;
 }
 
@@ -849,6 +882,33 @@ static int parse_transaction_path(XsHandle *self, PyObject *args,
 }
 
 
+static PyObject *match_watch_by_token(XsHandle *self, char **xsval)
+{
+    PyObject *token;
+    int i;
+
+    if (sscanf(xsval[XS_WATCH_TOKEN], "%li", (unsigned long *)&token) != 1) {
+        xs_set_error(EINVAL);
+        return NULL;
+    }
+    for (i = 0; i < PyList_Size(self->watches); i++) {
+        if (token == PyList_GetItem(self->watches, i))
+            break;
+    }
+    if (i == PyList_Size(self->watches)) {
+        /* We do not have a registered watch for the one that has just fired.
+           Ignore this -- a watch that has been recently deregistered can still
+           have watches in transit.
+        */
+        xs_set_error(EAGAIN);
+        return NULL;
+    }
+
+    /* Create tuple (path, token). */
+    return Py_BuildValue("(sO)", xsval[XS_WATCH_PATH], token);
+}
+
+
 static PyObject *none(bool result)
 {
     if (result) {
@@ -878,6 +938,7 @@ static PyMethodDef xshandle_methods[] = {
     XSPY_METH(set_permissions,   METH_VARARGS),
     XSPY_METH(watch,             METH_VARARGS),
     XSPY_METH(read_watch,        METH_NOARGS),
+    XSPY_METH(check_watch,       METH_NOARGS),
     XSPY_METH(unwatch,           METH_VARARGS),
     XSPY_METH(transaction_start, METH_NOARGS),
     XSPY_METH(transaction_end,   METH_VARARGS | METH_KEYWORDS),
@@ -887,6 +948,7 @@ static PyMethodDef xshandle_methods[] = {
     XSPY_METH(release_domain,    METH_VARARGS),
     XSPY_METH(close,             METH_NOARGS),
     XSPY_METH(get_domain_path,   METH_VARARGS),
+    XSPY_METH(fileno,            METH_NOARGS),
     { NULL /* Sentinel. */ },
 };
 

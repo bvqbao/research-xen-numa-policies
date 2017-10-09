@@ -59,7 +59,7 @@ void send_timeoffset_req(unsigned long timeoff)
     if ( timeoff == 0 )
         return;
 
-    if ( hvm_broadcast_ioreq(&p, 1) != 0 )
+    if ( hvm_broadcast_ioreq(&p, true) != 0 )
         gprintk(XENLOG_ERR, "Unsuccessful timeoffset update\n");
 }
 
@@ -73,7 +73,7 @@ void send_invalidate_req(void)
         .data = ~0UL, /* flush all */
     };
 
-    if ( hvm_broadcast_ioreq(&p, 0) != 0 )
+    if ( hvm_broadcast_ioreq(&p, false) != 0 )
         gprintk(XENLOG_ERR, "Unsuccessful map-cache invalidate\n");
 }
 
@@ -96,8 +96,13 @@ bool hvm_emulate_one_insn(hvm_emulate_validate_t *validate, const char *descr)
     switch ( rc )
     {
     case X86EMUL_UNHANDLEABLE:
-        hvm_dump_emulation_state(XENLOG_G_WARNING, descr, &ctxt);
+        hvm_dump_emulation_state(XENLOG_G_WARNING, descr, &ctxt, rc);
         return false;
+
+    case X86EMUL_UNRECOGNIZED:
+        hvm_dump_emulation_state(XENLOG_G_WARNING, descr, &ctxt, rc);
+        hvm_inject_hw_exception(TRAP_invalid_op, X86_EVENT_NO_EC);
+        break;
 
     case X86EMUL_EXCEPTION:
         hvm_inject_event(&ctxt.ctxt.event);

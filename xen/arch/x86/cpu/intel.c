@@ -176,7 +176,7 @@ static void intel_ctxt_switch_levelling(const struct vcpu *next)
 		 */
 		set_cpuid_faulting(nextd && !is_control_domain(nextd) &&
 				   (is_pv_domain(nextd) ||
-				    next->arch.cpuid_faulting));
+				    next->arch.msr->misc_features_enables.cpuid_faulting));
 		return;
 	}
 

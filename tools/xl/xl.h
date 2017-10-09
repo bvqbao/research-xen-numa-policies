@@ -167,6 +167,9 @@ int main_blockdetach(int argc, char **argv);
 int main_vtpmattach(int argc, char **argv);
 int main_vtpmlist(int argc, char **argv);
 int main_vtpmdetach(int argc, char **argv);
+int main_vdisplattach(int argc, char **argv);
+int main_vdispllist(int argc, char **argv);
+int main_vdispldetach(int argc, char **argv);
 int main_usbctrl_attach(int argc, char **argv);
 int main_usbctrl_detach(int argc, char **argv);
 int main_usbdev_attach(int argc, char **argv);
@@ -272,6 +275,8 @@ extern char *default_vifbackend;
 extern char *default_remus_netbufscript;
 extern char *default_colo_proxy_script;
 extern char *blkdev_start;
+extern int max_grant_frames;
+extern int max_maptrack_frames;
 
 enum output_format {
     OUTPUT_FORMAT_JSON,

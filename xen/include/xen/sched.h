@@ -792,6 +792,9 @@ static inline struct domain *next_domain_in_cpupool(
  /* VCPU is being reset. */
 #define _VPF_in_reset        7
 #define VPF_in_reset         (1UL<<_VPF_in_reset)
+/* VCPU is parked. */
+#define _VPF_parked          8
+#define VPF_parked           (1UL<<_VPF_parked)
 
 static inline int vcpu_runnable(struct vcpu *v)
 {
@@ -914,7 +917,7 @@ int cpupool_do_sysctl(struct xen_sysctl_cpupool_op *op);
 void schedule_dump(struct cpupool *c);
 extern void dump_runq(unsigned char key);
 
-void arch_do_physinfo(xen_sysctl_physinfo_t *pi);
+void arch_do_physinfo(struct xen_sysctl_physinfo *pi);
 
 #endif /* __SCHED_H__ */
 

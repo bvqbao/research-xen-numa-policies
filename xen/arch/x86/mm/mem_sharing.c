@@ -1052,7 +1052,8 @@ int mem_sharing_add_to_physmap(struct domain *sd, unsigned long sgfn, shr_handle
         goto err_unlock;
     }
 
-    ret = p2m_set_entry(p2m, cgfn, smfn, PAGE_ORDER_4K, p2m_ram_shared, a);
+    ret = p2m_set_entry(p2m, _gfn(cgfn), smfn, PAGE_ORDER_4K,
+                        p2m_ram_shared, a);
 
     /* Tempted to turn this into an assert */
     if ( ret )
@@ -1234,7 +1235,7 @@ int relinquish_shared_pages(struct domain *d)
 
         if ( atomic_read(&d->shr_pages) == 0 )
             break;
-        mfn = p2m->get_entry(p2m, gfn, &t, &a, 0, NULL, NULL);
+        mfn = p2m->get_entry(p2m, _gfn(gfn), &t, &a, 0, NULL, NULL);
         if ( mfn_valid(mfn) && (t == p2m_ram_shared) )
         {
             /* Does not fail with ENOMEM given the DESTROY flag */
@@ -1243,7 +1244,7 @@ int relinquish_shared_pages(struct domain *d)
             /* Clear out the p2m entry so no one else may try to
              * unshare.  Must succeed: we just read the old entry and
              * we hold the p2m lock. */
-            set_rc = p2m->set_entry(p2m, gfn, _mfn(0), PAGE_ORDER_4K,
+            set_rc = p2m->set_entry(p2m, _gfn(gfn), _mfn(0), PAGE_ORDER_4K,
                                     p2m_invalid, p2m_access_rwx, -1);
             ASSERT(set_rc == 0);
             count += 0x10;
@@ -1606,7 +1607,7 @@ out:
     return rc;
 }
 
-int mem_sharing_domctl(struct domain *d, xen_domctl_mem_sharing_op_t *mec)
+int mem_sharing_domctl(struct domain *d, struct xen_domctl_mem_sharing_op *mec)
 {
     int rc;
 

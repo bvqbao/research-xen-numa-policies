@@ -133,6 +133,7 @@ static int libxl__primary_console_find(libxl_ctx *ctx, uint32_t domid_vm,
             *cons_num = 0;
             *type = LIBXL_CONSOLE_TYPE_SERIAL;
             break;
+        case LIBXL_DOMAIN_TYPE_PVH:
         case LIBXL_DOMAIN_TYPE_PV:
             *domid = domid_vm;
             *cons_num = 0;
@@ -583,11 +584,10 @@ int libxl_device_channel_getinfo(libxl_ctx *ctx, uint32_t domid,
     return rc;
 }
 
-int libxl__device_vkb_setdefault(libxl__gc *gc, libxl_device_vkb *vkb)
+static int libxl__device_vkb_setdefault(libxl__gc *gc, uint32_t domid,
+                                        libxl_device_vkb *vkb, bool hotplug)
 {
-    int rc;
-    rc = libxl__resolve_domid(gc, vkb->backend_domname, &vkb->backend_domid);
-    return rc;
+    return libxl__resolve_domid(gc, vkb->backend_domname, &vkb->backend_domid);
 }
 
 static int libxl__device_from_vkb(libxl__gc *gc, uint32_t domid,
@@ -610,7 +610,7 @@ int libxl_device_vkb_add(libxl_ctx *ctx, uint32_t domid, libxl_device_vkb *vkb,
     AO_CREATE(ctx, domid, ao_how);
     int rc;
 
-    rc = libxl__device_vkb_add(gc, domid, vkb);
+    rc = libxl__device_add(gc, domid, &libxl__vkb_devtype, vkb);
     if (rc) {
         LOGD(ERROR, domid, "Unable to add vkb device");
         goto out;
@@ -621,52 +621,10 @@ out:
     return AO_INPROGRESS;
 }
 
-int libxl__device_vkb_add(libxl__gc *gc, uint32_t domid,
-                          libxl_device_vkb *vkb)
-{
-    flexarray_t *front;
-    flexarray_t *back;
-    libxl__device device;
-    int rc;
+static LIBXL_DEFINE_UPDATE_DEVID(vkb, "vkb")
 
-    rc = libxl__device_vkb_setdefault(gc, vkb);
-    if (rc) goto out;
-
-    front = flexarray_make(gc, 16, 1);
-    back = flexarray_make(gc, 16, 1);
-
-    if (vkb->devid == -1) {
-        if ((vkb->devid = libxl__device_nextid(gc, domid, "vkb")) < 0) {
-            rc = ERROR_FAIL;
-            goto out;
-        }
-    }
-
-    rc = libxl__device_from_vkb(gc, domid, vkb, &device);
-    if (rc != 0) goto out;
-
-    flexarray_append(back, "frontend-id");
-    flexarray_append(back, GCSPRINTF("%d", domid));
-    flexarray_append(back, "online");
-    flexarray_append(back, "1");
-    flexarray_append(back, "state");
-    flexarray_append(back, GCSPRINTF("%d", XenbusStateInitialising));
-
-    flexarray_append(front, "backend-id");
-    flexarray_append(front, GCSPRINTF("%d", vkb->backend_domid));
-    flexarray_append(front, "state");
-    flexarray_append(front, GCSPRINTF("%d", XenbusStateInitialising));
-
-    libxl__device_generic_add(gc, XBT_NULL, &device,
-                              libxl__xs_kvs_of_flexarray(gc, back),
-                              libxl__xs_kvs_of_flexarray(gc, front),
-                              NULL);
-    rc = 0;
-out:
-    return rc;
-}
-
-int libxl__device_vfb_setdefault(libxl__gc *gc, libxl_device_vfb *vfb)
+static int libxl__device_vfb_setdefault(libxl__gc *gc, uint32_t domid,
+                                        libxl_device_vfb *vfb, bool hotplug)
 {
     int rc;
 
@@ -708,7 +666,7 @@ int libxl_device_vfb_add(libxl_ctx *ctx, uint32_t domid, libxl_device_vfb *vfb,
     AO_CREATE(ctx, domid, ao_how);
     int rc;
 
-    rc = libxl__device_vfb_add(gc, domid, vfb);
+    rc = libxl__device_add(gc, domid, &libxl__vfb_devtype, vfb);
     if (rc) {
         LOGD(ERROR, domid, "Unable to add vfb device");
         goto out;
@@ -719,32 +677,13 @@ out:
     return AO_INPROGRESS;
 }
 
-int libxl__device_vfb_add(libxl__gc *gc, uint32_t domid, libxl_device_vfb *vfb)
+static LIBXL_DEFINE_UPDATE_DEVID(vfb, "vfb")
+
+static int libxl__set_xenstore_vfb(libxl__gc *gc, uint32_t domid,
+                                   libxl_device_vfb *vfb,
+                                  flexarray_t *back, flexarray_t *front,
+                                  flexarray_t *ro_front)
 {
-    flexarray_t *front;
-    flexarray_t *back;
-    libxl__device device;
-    int rc;
-
-    rc = libxl__device_vfb_setdefault(gc, vfb);
-    if (rc) goto out;
-
-    front = flexarray_make(gc, 16, 1);
-    back = flexarray_make(gc, 16, 1);
-
-    if (vfb->devid == -1) {
-        if ((vfb->devid = libxl__device_nextid(gc, domid, "vfb")) < 0) {
-            rc = ERROR_FAIL;
-            goto out;
-        }
-    }
-
-    rc = libxl__device_from_vfb(gc, domid, vfb, &device);
-    if (rc != 0) goto out;
-
-    flexarray_append_pair(back, "frontend-id", GCSPRINTF("%d", domid));
-    flexarray_append_pair(back, "online", "1");
-    flexarray_append_pair(back, "state", GCSPRINTF("%d", XenbusStateInitialising));
     flexarray_append_pair(back, "vnc",
                           libxl_defbool_val(vfb->vnc.enable) ? "1" : "0");
     flexarray_append_pair(back, "vnclisten", vfb->vnc.listen);
@@ -764,17 +703,7 @@ int libxl__device_vfb_add(libxl__gc *gc, uint32_t domid, libxl_device_vfb *vfb)
         flexarray_append_pair(back, "display", vfb->sdl.display);
     }
 
-    flexarray_append_pair(front, "backend-id",
-                          GCSPRINTF("%d", vfb->backend_domid));
-    flexarray_append_pair(front, "state", GCSPRINTF("%d", XenbusStateInitialising));
-
-    libxl__device_generic_add(gc, XBT_NULL, &device,
-                              libxl__xs_kvs_of_flexarray(gc, back),
-                              libxl__xs_kvs_of_flexarray(gc, front),
-                              NULL);
-    rc = 0;
-out:
-    return rc;
+    return 0;
 }
 
 /* The following functions are defined:
@@ -789,10 +718,29 @@ out:
  * 2. dynamically add/remove qemu chardevs via qmp messages. */
 
 /* vkb */
+
+#define libxl__add_vkbs NULL
+#define libxl_device_vkb_list NULL
+#define libxl_device_vkb_compare NULL
+
 LIBXL_DEFINE_DEVICE_REMOVE(vkb)
+
+DEFINE_DEVICE_TYPE_STRUCT(vkb,
+    .skip_attach = 1
+);
+
+#define libxl__add_vfbs NULL
+#define libxl_device_vfb_list NULL
+#define libxl_device_vfb_compare NULL
 
 /* vfb */
 LIBXL_DEFINE_DEVICE_REMOVE(vfb)
+
+DEFINE_DEVICE_TYPE_STRUCT(vfb,
+    .skip_attach = 1,
+    .set_xenstore_config = (device_set_xenstore_config_fn_t)
+                           libxl__set_xenstore_vfb,
+);
 
 libxl_xen_console_reader *
     libxl_xen_console_read_start(libxl_ctx *ctx, int clear)

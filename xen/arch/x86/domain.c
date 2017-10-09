@@ -64,6 +64,7 @@
 #include <compat/vcpu.h>
 #include <asm/psr.h>
 #include <asm/pv/domain.h>
+#include <asm/pv/mm.h>
 
 DEFINE_PER_CPU(struct vcpu *, curr_vcpu);
 
@@ -350,12 +351,26 @@ int vcpu_initialise(struct vcpu *v)
         /* Idle domain */
         v->arch.cr3 = __pa(idle_pg_table);
         rc = 0;
+        v->arch.msr = ZERO_BLOCK_PTR; /* Catch stray misuses */
     }
 
     if ( rc )
-        vcpu_destroy_fpu(v);
-    else if ( !is_idle_domain(v->domain) )
+        goto fail;
+
+    if ( !is_idle_domain(v->domain) )
+    {
         vpmu_initialise(v);
+
+        if ( (rc = init_vcpu_msr_policy(v)) )
+            goto fail;
+    }
+
+    return rc;
+
+ fail:
+    vcpu_destroy_fpu(v);
+    xfree(v->arch.msr);
+    v->arch.msr = NULL;
 
     return rc;
 }
@@ -431,6 +446,7 @@ int arch_domain_create(struct domain *d, unsigned int domcr_flags,
     {
         d->arch.emulation_flags = 0;
         d->arch.cpuid = ZERO_BLOCK_PTR; /* Catch stray misuses. */
+        d->arch.msr = ZERO_BLOCK_PTR;
     }
     else
     {
@@ -474,6 +490,9 @@ int arch_domain_create(struct domain *d, unsigned int domcr_flags,
         paging_initialised = 1;
 
         if ( (rc = init_domain_cpuid_policy(d)) )
+            goto fail;
+
+        if ( (rc = init_domain_msr_policy(d)) )
             goto fail;
 
         d->arch.ioport_caps = 
@@ -546,6 +565,7 @@ int arch_domain_create(struct domain *d, unsigned int domcr_flags,
     cleanup_domain_irq_mapping(d);
     free_xenheap_page(d->shared_info);
     xfree(d->arch.cpuid);
+    xfree(d->arch.msr);
     if ( paging_initialised )
         paging_final_teardown(d);
     free_perdomain_mappings(d);
@@ -560,6 +580,7 @@ void arch_domain_destroy(struct domain *d)
 
     xfree(d->arch.e820);
     xfree(d->arch.cpuid);
+    xfree(d->arch.msr);
 
     free_domain_pirqs(d);
     if ( !is_idle_domain(d) )
@@ -992,7 +1013,7 @@ int arch_set_info_guest(
         return rc;
 
     if ( !compat )
-        rc = (int)set_gdt(v, c.nat->gdt_frames, c.nat->gdt_ents);
+        rc = (int)pv_set_gdt(v, c.nat->gdt_frames, c.nat->gdt_ents);
     else
     {
         unsigned long gdt_frames[ARRAY_SIZE(v->arch.pv_vcpu.gdt_frames)];
@@ -1002,7 +1023,7 @@ int arch_set_info_guest(
             return -EINVAL;
         for ( i = 0; i < n; ++i )
             gdt_frames[i] = c.cmp->gdt_frames[i];
-        rc = (int)set_gdt(v, gdt_frames, c.cmp->gdt_ents);
+        rc = (int)pv_set_gdt(v, gdt_frames, c.cmp->gdt_ents);
     }
     if ( rc != 0 )
         return rc;
@@ -1101,7 +1122,7 @@ int arch_set_info_guest(
     {
         if ( cr3_page )
             put_page(cr3_page);
-        destroy_gdt(v);
+        pv_destroy_gdt(v);
         return rc;
     }
 
@@ -1153,7 +1174,7 @@ int arch_vcpu_reset(struct vcpu *v)
 {
     if ( is_pv_vcpu(v) )
     {
-        destroy_gdt(v);
+        pv_destroy_gdt(v);
         return vcpu_destroy_pagetables(v);
     }
 
@@ -1896,7 +1917,7 @@ int domain_relinquish_resources(struct domain *d)
                  * the LDT as it automatically gets squashed with the guest
                  * mappings.
                  */
-                destroy_gdt(v);
+                pv_destroy_gdt(v);
             }
         }
 

@@ -33,8 +33,8 @@
 #include <asm/regs.h>
 #include <asm/vfp.h>
 #include <asm/vgic.h>
+#include <asm/vtimer.h>
 
-#include "vtimer.h"
 #include "vuart.h"
 
 DEFINE_PER_CPU(struct vcpu *, curr_vcpu);
@@ -486,13 +486,11 @@ struct domain *alloc_domain_struct(void)
         return NULL;
 
     clear_page(d);
-    d->arch.grant_table_gfn = xzalloc_array(gfn_t, max_grant_frames);
     return d;
 }
 
 void free_domain_struct(struct domain *d)
 {
-    xfree(d->arch.grant_table_gfn);
     free_xenheap_page(d);
 }
 

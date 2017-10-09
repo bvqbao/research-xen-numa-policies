@@ -1714,8 +1714,7 @@ int xc_domain_update_msi_irq(
     uint64_t gtable)
 {
     int rc;
-    xen_domctl_bind_pt_irq_t *bind;
-
+    struct xen_domctl_bind_pt_irq *bind;
     DECLARE_DOMCTL;
 
     domctl.cmd = XEN_DOMCTL_bind_pt_irq;
@@ -1740,8 +1739,7 @@ int xc_domain_unbind_msi_irq(
     uint32_t gflags)
 {
     int rc;
-    xen_domctl_bind_pt_irq_t *bind;
-
+    struct xen_domctl_bind_pt_irq *bind;
     DECLARE_DOMCTL;
 
     domctl.cmd = XEN_DOMCTL_unbind_pt_irq;
@@ -1770,7 +1768,7 @@ static int xc_domain_bind_pt_irq_int(
     uint16_t spi)
 {
     int rc;
-    xen_domctl_bind_pt_irq_t * bind;
+    struct xen_domctl_bind_pt_irq *bind;
     DECLARE_DOMCTL;
 
     domctl.cmd = XEN_DOMCTL_bind_pt_irq;
@@ -1828,7 +1826,7 @@ static int xc_domain_unbind_pt_irq_int(
     uint8_t spi)
 {
     int rc;
-    xen_domctl_bind_pt_irq_t * bind;
+    struct xen_domctl_bind_pt_irq *bind;
     DECLARE_DOMCTL;
 
     domctl.cmd = XEN_DOMCTL_unbind_pt_irq;
@@ -2265,6 +2263,19 @@ int xc_domain_set_max_evtchn(xc_interface *xch, uint32_t domid,
     domctl.cmd = XEN_DOMCTL_set_max_evtchn;
     domctl.domain = domid;
     domctl.u.set_max_evtchn.max_port = max_port;
+    return do_domctl(xch, &domctl);
+}
+
+int xc_domain_set_gnttab_limits(xc_interface *xch, domid_t domid,
+                                uint32_t grant_frames,
+                                uint32_t maptrack_frames)
+{
+    DECLARE_DOMCTL;
+
+    domctl.cmd = XEN_DOMCTL_set_gnttab_limits;
+    domctl.domain = domid;
+    domctl.u.set_gnttab_limits.grant_frames = grant_frames;
+    domctl.u.set_gnttab_limits.maptrack_frames = maptrack_frames;
     return do_domctl(xch, &domctl);
 }
 

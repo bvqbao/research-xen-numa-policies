@@ -903,7 +903,7 @@ int xc_vcpu_get_extstate(xc_interface *xch,
                          uint32_t vcpu,
                          xc_vcpu_extstate_t *extstate);
 
-typedef xen_domctl_getvcpuinfo_t xc_vcpuinfo_t;
+typedef struct xen_domctl_getvcpuinfo xc_vcpuinfo_t;
 int xc_vcpu_getinfo(xc_interface *xch,
                     uint32_t domid,
                     uint32_t vcpu,
@@ -916,7 +916,7 @@ long long xc_domain_get_cpu_usage(xc_interface *xch,
 int xc_domain_sethandle(xc_interface *xch, uint32_t domid,
                         xen_domain_handle_t handle);
 
-typedef xen_domctl_shadow_op_stats_t xc_shadow_op_stats_t;
+typedef struct xen_domctl_shadow_op_stats xc_shadow_op_stats_t;
 int xc_shadow_control(xc_interface *xch,
                       uint32_t domid,
                       unsigned int sop,
@@ -1063,6 +1063,19 @@ int xc_domain_set_virq_handler(xc_interface *xch, uint32_t domid, int virq);
  */
 int xc_domain_set_max_evtchn(xc_interface *xch, uint32_t domid,
                              uint32_t max_port);
+
+/**
+ * Set the maximum number of grant frames and maptrack frames a domain
+ * can have. Must be used at domain setup time and only then.
+ *
+ * @param xch a handle to an open hypervisor interface
+ * @param domid the domain id
+ * @param grant_frames max. number of grant frames
+ * @param maptrack_frames max. number of maptrack frames
+ */
+int xc_domain_set_gnttab_limits(xc_interface *xch, domid_t domid,
+                                uint32_t grant_frames,
+                                uint32_t maptrack_frames);
 
 /*
  * CPUPOOL MANAGEMENT FUNCTIONS
@@ -1212,11 +1225,11 @@ int xc_readconsolering(xc_interface *xch,
 int xc_send_debug_keys(xc_interface *xch, char *keys);
 int xc_set_parameters(xc_interface *xch, char *params);
 
-typedef xen_sysctl_physinfo_t xc_physinfo_t;
-typedef xen_sysctl_cputopo_t xc_cputopo_t;
-typedef xen_sysctl_numainfo_t xc_numainfo_t;
-typedef xen_sysctl_meminfo_t xc_meminfo_t;
-typedef xen_sysctl_pcitopoinfo_t xc_pcitopoinfo_t;
+typedef struct xen_sysctl_physinfo xc_physinfo_t;
+typedef struct xen_sysctl_cputopo xc_cputopo_t;
+typedef struct xen_sysctl_numainfo xc_numainfo_t;
+typedef struct xen_sysctl_meminfo xc_meminfo_t;
+typedef struct xen_sysctl_pcitopoinfo xc_pcitopoinfo_t;
 
 typedef uint32_t xc_cpu_to_node_t;
 typedef uint32_t xc_cpu_to_socket_t;
@@ -1240,7 +1253,7 @@ int xc_machphys_mfn_list(xc_interface *xch,
                          unsigned long max_extents,
                          xen_pfn_t *extent_start);
 
-typedef xen_sysctl_cpuinfo_t xc_cpuinfo_t;
+typedef struct xen_sysctl_cpuinfo xc_cpuinfo_t;
 int xc_getcpuinfo(xc_interface *xch, int max_cpus,
                   xc_cpuinfo_t *info, int *nr_cpus); 
 
@@ -1853,8 +1866,8 @@ int xc_cpu_offline(xc_interface *xch, int cpu);
  * cpufreq para name of this structure named 
  * same as sysfs file name of native linux
  */
-typedef xen_userspace_t xc_userspace_t;
-typedef xen_ondemand_t xc_ondemand_t;
+typedef struct xen_userspace xc_userspace_t;
+typedef struct xen_ondemand xc_ondemand_t;
 
 struct xc_get_cpufreq_para {
     /* IN/OUT variable */
@@ -2028,6 +2041,8 @@ int xc_monitor_debug_exceptions(xc_interface *xch, domid_t domain_id,
 int xc_monitor_cpuid(xc_interface *xch, domid_t domain_id, bool enable);
 int xc_monitor_privileged_call(xc_interface *xch, domid_t domain_id,
                                bool enable);
+int xc_monitor_emul_unimplemented(xc_interface *xch, domid_t domain_id,
+                                  bool enable);
 /**
  * This function enables / disables emulation for each REP for a
  * REP-compatible instruction.

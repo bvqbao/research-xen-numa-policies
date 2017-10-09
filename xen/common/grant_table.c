@@ -40,6 +40,47 @@
 #include <xsm/xsm.h>
 #include <asm/flushtlb.h>
 
+/* Per-domain grant information. */
+struct grant_table {
+    /*
+     * Lock protecting updates to grant table state (version, active
+     * entry list, etc.)
+     */
+    percpu_rwlock_t       lock;
+    /* Lock protecting the maptrack limit */
+    spinlock_t            maptrack_lock;
+    /*
+     * The defined versions are 1 and 2.  Set to 0 if we don't know
+     * what version to use yet.
+     */
+    unsigned int          gt_version;
+    /* Table size. Number of frames shared with guest */
+    unsigned int          nr_grant_frames;
+    /* Number of grant status frames shared with guest (for version 2) */
+    unsigned int          nr_status_frames;
+    /* Number of available maptrack entries. */
+    unsigned int          maptrack_limit;
+    /* Shared grant table (see include/public/grant_table.h). */
+    union {
+        void **shared_raw;
+        struct grant_entry_v1 **shared_v1;
+        union grant_entry_v2 **shared_v2;
+    };
+    /* State grant table (see include/public/grant_table.h). */
+    grant_status_t       **status;
+    /* Active grant table. */
+    struct active_grant_entry **active;
+    /* Mapping tracking table per vcpu. */
+    struct grant_mapping **maptrack;
+
+    struct grant_table_arch arch;
+};
+
+#ifndef DEFAULT_MAX_NR_GRANT_FRAMES /* to allow arch to override */
+/* Default maximum size of a grant table. [POLICY] */
+#define DEFAULT_MAX_NR_GRANT_FRAMES   32
+#endif
+
 unsigned int __read_mostly max_grant_frames;
 integer_param("gnttab_max_frames", max_grant_frames);
 
@@ -117,6 +158,18 @@ struct grant_mapping {
     uint32_t vcpu;          /* vcpu which created the grant mapping */
     uint32_t pad;           /* round size to a power of 2 */
 };
+
+/* Number of grant table frames. Caller must hold d's grant table lock. */
+static inline unsigned int nr_grant_frames(const struct grant_table *gt)
+{
+    return gt->nr_grant_frames;
+}
+
+/* Number of status grant table frames. Caller must hold d's gr. table lock.*/
+static inline unsigned int nr_status_frames(const struct grant_table *gt)
+{
+    return gt->nr_status_frames;
+}
 
 #define MAPTRACK_PER_PAGE (PAGE_SIZE / sizeof(struct grant_mapping))
 #define maptrack_entry(t, e) \
@@ -197,7 +250,27 @@ static inline void act_set_gfn(struct active_grant_entry *act, gfn_t gfn)
 #endif
 }
 
-DEFINE_PERCPU_RWLOCK_GLOBAL(grant_rwlock);
+static DEFINE_PERCPU_RWLOCK_GLOBAL(grant_rwlock);
+
+static inline void grant_read_lock(struct grant_table *gt)
+{
+    percpu_read_lock(grant_rwlock, &gt->lock);
+}
+
+static inline void grant_read_unlock(struct grant_table *gt)
+{
+    percpu_read_unlock(grant_rwlock, &gt->lock);
+}
+
+static inline void grant_write_lock(struct grant_table *gt)
+{
+    percpu_write_lock(grant_rwlock, &gt->lock);
+}
+
+static inline void grant_write_unlock(struct grant_table *gt)
+{
+    percpu_write_unlock(grant_rwlock, &gt->lock);
+}
 
 static inline void gnttab_flush_tlb(const struct domain *d)
 {
@@ -250,6 +323,14 @@ static inline void active_entry_release(struct active_grant_entry *act)
     spin_unlock(&act->lock);
 }
 
+#define GRANT_STATUS_PER_PAGE (PAGE_SIZE / sizeof(grant_status_t))
+#define GRANT_PER_PAGE (PAGE_SIZE / sizeof(grant_entry_v2_t))
+/* Number of grant table status entries. Caller must hold d's gr. table lock.*/
+static inline unsigned int grant_to_status_frames(unsigned int grant_frames)
+{
+    return DIV_ROUND_UP(grant_frames * GRANT_PER_PAGE, GRANT_STATUS_PER_PAGE);
+}
+
 /* Check if the page has been paged out, or needs unsharing.
    If rc == GNTST_okay, *page contains the page struct with a ref taken.
    Caller must do put_page(*page).
@@ -259,34 +340,36 @@ static int get_paged_frame(unsigned long gfn, unsigned long *frame,
                            struct domain *rd)
 {
     int rc = GNTST_okay;
-#if defined(P2M_PAGED_TYPES) || defined(P2M_SHARED_TYPES)
     p2m_type_t p2mt;
 
+    *frame = mfn_x(INVALID_MFN);
     *page = get_page_from_gfn(rd, gfn, &p2mt,
-                              (readonly) ? P2M_ALLOC : P2M_UNSHARE);
-    if ( !(*page) )
+                              readonly ? P2M_ALLOC : P2M_UNSHARE);
+    if ( !*page )
     {
-        *frame = mfn_x(INVALID_MFN);
+#ifdef P2M_SHARED_TYPES
         if ( p2m_is_shared(p2mt) )
             return GNTST_eagain;
+#endif
+#ifdef P2M_PAGES_TYPES
         if ( p2m_is_paging(p2mt) )
         {
             p2m_mem_paging_populate(rd, gfn);
             return GNTST_eagain;
         }
+#endif
         return GNTST_bad_page;
     }
-    *frame = page_to_mfn(*page);
-#else
-    *frame = mfn_x(gfn_to_mfn(rd, _gfn(gfn)));
-    *page = mfn_valid(_mfn(*frame)) ? mfn_to_page(*frame) : NULL;
-    if ( (!(*page)) || (!get_page(*page, rd)) )
+
+    if ( p2m_is_foreign(p2mt) )
     {
-        *frame = mfn_x(INVALID_MFN);
+        put_page(*page);
         *page = NULL;
-        rc = GNTST_bad_page;
+
+        return GNTST_bad_page;
     }
-#endif
+
+    *frame = page_to_mfn(*page);
 
     return rc;
 }
@@ -1580,12 +1663,20 @@ gnttab_unpopulate_status_frames(struct domain *d, struct grant_table *gt)
  * Grow the grant table. The caller must hold the grant table's
  * write lock before calling this function.
  */
-int
+static int
 gnttab_grow_table(struct domain *d, unsigned int req_nr_frames)
 {
     struct grant_table *gt = d->grant_table;
     unsigned int i, j;
 
+    if ( unlikely(!gt->active) )
+    {
+        gprintk(XENLOG_WARNING, "grant_table_set_limits() call missing\n");
+        return -ENODEV;
+    }
+
+    if ( req_nr_frames < INITIAL_NR_GRANT_FRAMES )
+        req_nr_frames = INITIAL_NR_GRANT_FRAMES;
     ASSERT(req_nr_frames <= max_grant_frames);
 
     gdprintk(XENLOG_INFO,
@@ -1623,7 +1714,7 @@ gnttab_grow_table(struct domain *d, unsigned int req_nr_frames)
         gnttab_create_shared_page(d, gt, i);
     gt->nr_grant_frames = req_nr_frames;
 
-    return 1;
+    return 0;
 
 shared_alloc_failed:
     for ( i = nr_grant_frames(gt); i < req_nr_frames; i++ )
@@ -1639,7 +1730,70 @@ active_alloc_failed:
         gt->active[i] = NULL;
     }
     gdprintk(XENLOG_INFO, "Allocation failure when expanding grant table.\n");
-    return 0;
+
+    return -ENOMEM;
+}
+
+static int
+grant_table_init(struct domain *d, struct grant_table *gt)
+{
+    int ret = -ENOMEM;
+
+    grant_write_lock(gt);
+
+    if ( gt->active )
+    {
+        ret = -EBUSY;
+        goto out_no_cleanup;
+    }
+
+    /* Active grant table. */
+    gt->active = xzalloc_array(struct active_grant_entry *,
+                               max_nr_active_grant_frames);
+    if ( gt->active == NULL )
+        goto out;
+
+    /* Tracking of mapped foreign frames table */
+    gt->maptrack = vzalloc(max_maptrack_frames * sizeof(*gt->maptrack));
+    if ( gt->maptrack == NULL )
+        goto out;
+
+    /* Shared grant table. */
+    gt->shared_raw = xzalloc_array(void *, max_grant_frames);
+    if ( gt->shared_raw == NULL )
+        goto out;
+
+    /* Status pages for grant table - for version 2 */
+    gt->status = xzalloc_array(grant_status_t *,
+                               grant_to_status_frames(max_grant_frames));
+    if ( gt->status == NULL )
+        goto out;
+
+    ret = gnttab_init_arch(gt);
+    if ( ret )
+        goto out;
+
+    /* gnttab_grow_table() allocates a min number of frames, so 0 is okay. */
+    ret = gnttab_grow_table(d, 0);
+
+ out:
+    if ( ret )
+    {
+        gnttab_destroy_arch(gt);
+        xfree(gt->status);
+        gt->status = NULL;
+        xfree(gt->shared_raw);
+        gt->shared_raw = NULL;
+        vfree(gt->maptrack);
+        gt->maptrack = NULL;
+        xfree(gt->active);
+        gt->active = NULL;
+    }
+
+ out_no_cleanup:
+    grant_write_unlock(gt);
+
+    return ret;
 }
 
 static long
@@ -1692,7 +1846,7 @@ gnttab_setup_table(
     if ( (op.nr_frames > nr_grant_frames(gt) ||
           ((gt->gt_version > 1) &&
            (grant_to_status_frames(op.nr_frames) > nr_status_frames(gt)))) &&
-         !gnttab_grow_table(d, op.nr_frames) )
+         gnttab_grow_table(d, op.nr_frames) )
     {
         gdprintk(XENLOG_INFO,
                  "Expand grant table to %u failed. Current: %u Max: %u\n",
@@ -2866,18 +3020,18 @@ gnttab_get_status_frames(XEN_GUEST_HANDLE_PARAM(gnttab_get_status_frames_t) uop,
 
     gt = d->grant_table;
 
+    op.status = GNTST_okay;
+
+    grant_read_lock(gt);
+
     if ( unlikely(op.nr_frames > nr_status_frames(gt)) )
     {
         gdprintk(XENLOG_INFO, "Guest requested addresses for %d grant status "
                  "frames, but only %d are available.\n",
                  op.nr_frames, nr_status_frames(gt));
         op.status = GNTST_general_error;
-        goto out2;
+        goto unlock;
     }
-
-    op.status = GNTST_okay;
-
-    grant_read_lock(gt);
 
     for ( i = 0; i < op.nr_frames; i++ )
     {
@@ -2886,10 +3040,11 @@ gnttab_get_status_frames(XEN_GUEST_HANDLE_PARAM(gnttab_get_status_frames_t) uop,
             op.status = GNTST_bad_virt_addr;
     }
 
+ unlock:
     grant_read_unlock(gt);
-out2:
+ out2:
     rcu_unlock_domain(d);
-out1:
+ out1:
     if ( unlikely(__copy_field_to_guest(uop, &op, status)) )
         return -EFAULT;
 
@@ -3301,75 +3456,24 @@ grant_table_create(
     struct domain *d)
 {
     struct grant_table *t;
-    unsigned int i, j;
+    int ret = 0;
 
     if ( (t = xzalloc(struct grant_table)) == NULL )
-        goto no_mem_0;
+        return -ENOMEM;
 
     /* Simple stuff. */
     percpu_rwlock_resource_init(&t->lock, grant_rwlock);
     spin_lock_init(&t->maptrack_lock);
-    t->nr_grant_frames = INITIAL_NR_GRANT_FRAMES;
-
-    /* Active grant table. */
-    if ( (t->active = xzalloc_array(struct active_grant_entry *,
-                                    max_nr_active_grant_frames)) == NULL )
-        goto no_mem_1;
-    for ( i = 0;
-          i < num_act_frames_from_sha_frames(INITIAL_NR_GRANT_FRAMES); i++ )
-    {
-        if ( (t->active[i] = alloc_xenheap_page()) == NULL )
-            goto no_mem_2;
-        clear_page(t->active[i]);
-        for ( j = 0; j < ACGNT_PER_PAGE; j++ )
-            spin_lock_init(&t->active[i][j].lock);
-    }
-
-    /* Tracking of mapped foreign frames table */
-    t->maptrack = vzalloc(max_maptrack_frames * sizeof(*t->maptrack));
-    if ( t->maptrack == NULL )
-        goto no_mem_2;
-
-    /* Shared grant table. */
-    if ( (t->shared_raw = xzalloc_array(void *, max_grant_frames)) == NULL )
-        goto no_mem_3;
-    for ( i = 0; i < INITIAL_NR_GRANT_FRAMES; i++ )
-    {
-        if ( (t->shared_raw[i] = alloc_xenheap_page()) == NULL )
-            goto no_mem_4;
-        clear_page(t->shared_raw[i]);
-    }
-
-    /* Status pages for grant table - for version 2 */
-    t->status = xzalloc_array(grant_status_t *,
-                              grant_to_status_frames(max_grant_frames));
-    if ( t->status == NULL )
-        goto no_mem_4;
-
-    for ( i = 0; i < INITIAL_NR_GRANT_FRAMES; i++ )
-        gnttab_create_shared_page(d, t, i);
-
-    t->nr_status_frames = 0;
 
     /* Okay, install the structure. */
     d->grant_table = t;
-    return 0;
 
- no_mem_4:
-    for ( i = 0; i < INITIAL_NR_GRANT_FRAMES; i++ )
-        free_xenheap_page(t->shared_raw[i]);
-    xfree(t->shared_raw);
- no_mem_3:
-    vfree(t->maptrack);
- no_mem_2:
-    for ( i = 0;
-          i < num_act_frames_from_sha_frames(INITIAL_NR_GRANT_FRAMES); i++ )
-        free_xenheap_page(t->active[i]);
-    xfree(t->active);
- no_mem_1:
-    xfree(t);
- no_mem_0:
-    return -ENOMEM;
+    if ( d->domain_id == 0 )
+    {
+        ret = grant_table_init(d, t);
+    }
+
+    return ret;
 }
 
 void
@@ -3533,6 +3637,8 @@ grant_table_destroy(
     if ( t == NULL )
         return;
 
+    gnttab_destroy_arch(t);
+
     for ( i = 0; i < nr_grant_frames(t); i++ )
         free_xenheap_page(t->shared_raw[i]);
     xfree(t->shared_raw);
@@ -3558,6 +3664,18 @@ void grant_table_init_vcpu(struct vcpu *v)
     spin_lock_init(&v->maptrack_freelist_lock);
     v->maptrack_head = MAPTRACK_TAIL;
     v->maptrack_tail = MAPTRACK_TAIL;
+}
+
+int grant_table_set_limits(struct domain *d, unsigned int grant_frames,
+                           unsigned int maptrack_frames)
+{
+    struct grant_table *gt = d->grant_table;
+
+    if ( !gt )
+        return -ENOENT;
+
+    /* Set limits. */
+    return grant_table_init(d, gt);
 }
 
 #ifdef CONFIG_HAS_MEM_SHARING
@@ -3606,6 +3724,45 @@ int mem_sharing_gref_to_gfn(struct grant_table *gt, grant_ref_t ref,
     return rc;
 }
 #endif
+
+int gnttab_map_frame(struct domain *d, unsigned long idx, gfn_t gfn,
+                     mfn_t *mfn)
+{
+    int rc = 0;
+    struct grant_table *gt = d->grant_table;
+
+    grant_write_lock(gt);
+
+    if ( gt->gt_version == 0 )
+        gt->gt_version = 1;
+
+    if ( gt->gt_version == 2 &&
+         (idx & XENMAPIDX_grant_table_status) )
+    {
+        idx &= ~XENMAPIDX_grant_table_status;
+        if ( idx < nr_status_frames(gt) )
+            *mfn = _mfn(virt_to_mfn(gt->status[idx]));
+        else
+            rc = -EINVAL;
+    }
+    else
+    {
+        if ( (idx >= nr_grant_frames(gt)) && (idx < max_grant_frames) )
+            gnttab_grow_table(d, idx + 1);
+
+        if ( idx < nr_grant_frames(gt) )
+            *mfn = _mfn(virt_to_mfn(gt->shared_raw[idx]));
+        else
+            rc = -EINVAL;
+    }
+
+    if ( !rc )
+        gnttab_set_frame_gfn(gt, idx, gfn);
+
+    grant_write_unlock(gt);
+
+    return rc;
+}
 
 static void gnttab_usage_print(struct domain *rd)
 {

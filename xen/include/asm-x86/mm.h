@@ -329,8 +329,6 @@ static inline void *__page_to_virt(const struct page_info *pg)
 int free_page_type(struct page_info *page, unsigned long type,
                    int preemptible);
 
-void init_guest_l4_table(l4_pgentry_t[], const struct domain *,
-                         bool_t zap_ro_mpt);
 bool fill_ro_mpt(mfn_t mfn);
 void zap_ro_mpt(mfn_t mfn);
 
@@ -368,6 +366,20 @@ int  put_old_guest_table(struct vcpu *);
 int  get_page_from_l1e(
     l1_pgentry_t l1e, struct domain *l1e_owner, struct domain *pg_owner);
 void put_page_from_l1e(l1_pgentry_t l1e, struct domain *l1e_owner);
+
+static inline bool get_page_from_mfn(mfn_t mfn, struct domain *d)
+{
+    struct page_info *page = __mfn_to_page(mfn_x(mfn));
+
+    if ( unlikely(!mfn_valid(mfn)) || unlikely(!get_page(page, d)) )
+    {
+        gdprintk(XENLOG_WARNING,
+                 "Could not get page ref for mfn %"PRI_mfn"\n", mfn_x(mfn));
+        return false;
+    }
+
+    return true;
+}
 
 static inline void put_page_and_type(struct page_info *page)
 {
@@ -511,8 +523,6 @@ extern int mmcfg_intercept_write(enum x86_segment seg,
 int pv_emul_cpuid(uint32_t leaf, uint32_t subleaf,
                   struct cpuid_leaf *res, struct x86_emulate_ctxt *ctxt);
 
-int pv_ro_page_fault(unsigned long, struct cpu_user_regs *);
-
 int audit_adjust_pgtables(struct domain *d, int dir, int noisy);
 
 extern int pagefault_by_memadd(unsigned long addr, struct cpu_user_regs *regs);
@@ -536,7 +546,6 @@ void audit_domains(void);
 
 #endif
 
-int new_guest_cr3(mfn_t mfn);
 void make_cr3(struct vcpu *v, mfn_t mfn);
 void update_cr3(struct vcpu *v);
 int vcpu_destroy_pagetables(struct vcpu *);
@@ -549,8 +558,6 @@ long arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg);
 long subarch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg);
 int compat_arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void));
 int compat_subarch_memory_op(int op, XEN_GUEST_HANDLE_PARAM(void));
-
-bool map_ldt_shadow_page(unsigned int);
 
 #define NIL(type) ((type *)-sizeof(type))
 #define IS_NIL(ptr) (!((uintptr_t)(ptr) + sizeof(*(ptr))))

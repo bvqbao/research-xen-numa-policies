@@ -151,8 +151,7 @@ struct domain *__must_check page_get_owner_and_reference(struct page_info *);
 
 /* Boot-time allocator. Turns into generic allocator after bootstrap. */
 void init_boot_pages(paddr_t ps, paddr_t pe);
-unsigned long alloc_boot_pages(
-    unsigned long nr_pfns, unsigned long pfn_align);
+mfn_t alloc_boot_pages(unsigned long nr_pfns, unsigned long pfn_align);
 void end_boot_allocator(void);
 
 /* Xen suballocator. These functions are interrupt-safe. */
@@ -599,6 +598,9 @@ int page_is_ram_type(unsigned long mfn, unsigned long mem_type);
 int prepare_ring_for_helper(struct domain *d, unsigned long gmfn,
                             struct page_info **_page, void **_va);
 void destroy_ring_for_helper(void **_va, struct page_info *page);
+
+/* Return the upper bound of MFNs, including hotplug memory. */
+unsigned long get_upper_mfn_bound(void);
 
 #include <asm/flushtlb.h>
 

@@ -39,19 +39,20 @@ static int usbback_is_loaded(libxl__gc *gc)
 }
 
 static int libxl__device_usbctrl_setdefault(libxl__gc *gc, uint32_t domid,
-                                            libxl_device_usbctrl *usbctrl)
+                                            libxl_device_usbctrl *usbctrl,
+                                            bool hotplug)
 {
     int rc;
     libxl_domain_type domtype = libxl__domain_type(gc, domid);
 
     if (usbctrl->type == LIBXL_USBCTRL_TYPE_AUTO) {
-        if (domtype == LIBXL_DOMAIN_TYPE_PV) {
+        if (domtype != LIBXL_DOMAIN_TYPE_HVM) {
             rc = usbback_is_loaded(gc);
             if (rc < 0)
                 goto out;
             usbctrl->type = rc ? LIBXL_USBCTRL_TYPE_PV
                                : LIBXL_USBCTRL_TYPE_QUSB;
-        } else if (domtype == LIBXL_DOMAIN_TYPE_HVM) {
+        } else {
             /* FIXME: See if we can detect PV frontend */
             usbctrl->type = LIBXL_USBCTRL_TYPE_DEVICEMODEL;
         }
@@ -245,8 +246,8 @@ static int libxl__device_usbctrl_add_xenstore(libxl__gc *gc, uint32_t domid,
         rc = libxl__get_domain_configuration(gc, domid, &d_config);
         if (rc) goto out;
 
-        DEVICE_ADD(usbctrl, usbctrls, domid, &usbctrl_saved,
-                   COMPARE_USBCTRL, &d_config);
+        device_add_domain_config(gc, &d_config, &libxl__usbctrl_devtype,
+                                 &usbctrl_saved);
 
         rc = libxl__dm_check_start(gc, &d_config, domid);
         if (rc) goto out;
@@ -429,6 +430,8 @@ static int libxl__device_usbdev_del_hvm(libxl__gc *gc, uint32_t domid,
     return libxl__qmp_run_command_flexarray(gc, domid, "device_del", qmp_args);
 }
 
+static LIBXL_DEFINE_UPDATE_DEVID(usbctrl, "vusb")
+
 /* AO operation to add a usb controller.
  *
  * Generally, it does:
@@ -449,16 +452,12 @@ static void libxl__device_usbctrl_add(libxl__egc *egc, uint32_t domid,
     libxl__device *device;
     int rc;
 
-    rc = libxl__device_usbctrl_setdefault(gc, domid, usbctrl);
+    rc = libxl__device_usbctrl_setdefault(gc, domid, usbctrl,
+                                          aodev->update_json);
     if (rc < 0) goto out;
 
-    if (usbctrl->devid == -1) {
-        usbctrl->devid = libxl__device_nextid(gc, domid, "vusb");
-        if (usbctrl->devid < 0) {
-            rc = ERROR_FAIL;
-            goto out;
-        }
-    }
+    rc = libxl__device_usbctrl_update_devid(gc, domid, usbctrl);
+    if (rc) goto out;
 
     rc = libxl__device_usbctrl_add_xenstore(gc, domid, usbctrl,
                                             aodev->update_json);
@@ -1079,16 +1078,12 @@ static int libxl__device_usbdev_setdefault(libxl__gc *gc,
 
             GCNEW(usbctrl);
             libxl_device_usbctrl_init(usbctrl);
-            rc = libxl__device_usbctrl_setdefault(gc, domid, usbctrl);
+            rc = libxl__device_usbctrl_setdefault(gc, domid, usbctrl,
+                                                  update_json);
             if (rc < 0) goto out;
 
-            if (usbctrl->devid == -1) {
-                usbctrl->devid = libxl__device_nextid(gc, domid, "vusb");
-                if (usbctrl->devid < 0) {
-                    rc = ERROR_FAIL;
-                    goto out;
-                }
-            }
+            rc = libxl__device_usbctrl_update_devid(gc, domid, usbctrl);
+            if (rc) goto out;
 
             rc = libxl__device_usbctrl_add_xenstore(gc, domid, usbctrl,
                                                     update_json);
@@ -1199,8 +1194,8 @@ static int libxl__device_usbdev_add_xenstore(libxl__gc *gc, uint32_t domid,
         rc = libxl__get_domain_configuration(gc, domid, &d_config);
         if (rc) goto out;
 
-        DEVICE_ADD(usbdev, usbdevs, domid, &usbdev_saved,
-                   COMPARE_USB, &d_config);
+        device_add_domain_config(gc, &d_config, &libxl__usbdev_devtype,
+                                         &usbdev_saved);
 
         rc = libxl__dm_check_start(gc, &d_config, domid);
         if (rc) goto out;
@@ -1965,9 +1960,15 @@ void libxl_device_usbdev_list_free(libxl_device_usbdev *list, int nr)
    free(list);
 }
 
+#define libxl__device_usbctrl_update_devid NULL
+
 DEFINE_DEVICE_TYPE_STRUCT(usbctrl,
     .dm_needed = libxl_device_usbctrl_dm_needed
 );
+
+#define libxl__device_from_usbdev NULL
+#define libxl__device_usbdev_update_devid NULL
+
 DEFINE_DEVICE_TYPE_STRUCT(usbdev);
 
 /*

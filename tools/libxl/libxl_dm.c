@@ -648,6 +648,7 @@ static int libxl__build_device_model_args_old(libxl__gc *gc,
         flexarray_append(dm_args, b_info->extra[i]);
     flexarray_append(dm_args, "-M");
     switch (b_info->type) {
+    case LIBXL_DOMAIN_TYPE_PVH:
     case LIBXL_DOMAIN_TYPE_PV:
         flexarray_append(dm_args, "xenpv");
         for (i = 0; b_info->extra_pv && b_info->extra_pv[i] != NULL; i++)
@@ -1407,6 +1408,7 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
 
     flexarray_append(dm_args, "-machine");
     switch (b_info->type) {
+    case LIBXL_DOMAIN_TYPE_PVH:
     case LIBXL_DOMAIN_TYPE_PV:
         flexarray_append(dm_args, "xenpv");
         for (i = 0; b_info->extra_pv && b_info->extra_pv[i] != NULL; i++)
@@ -1845,6 +1847,9 @@ void libxl__spawn_stub_dm(libxl__egc *egc, libxl__stub_dm_spawn_state *sdss)
         guest_config->b_info.video_memkb;
     dm_config->b_info.target_memkb = dm_config->b_info.max_memkb;
 
+    dm_config->b_info.max_grant_frames = guest_config->b_info.max_grant_frames;
+    dm_config->b_info.max_maptrack_frames = 0;
+
     dm_config->b_info.u.pv.features = "";
 
     dm_config->b_info.device_model_version =
@@ -1975,20 +1980,20 @@ static void spawn_stub_launch_dm(libxl__egc *egc,
          * called libxl_device_nic_add at this point, but qemu needs
          * the nic information to be complete.
          */
-        ret = libxl__device_nic_setdefault(gc, &dm_config->nics[i], dm_domid,
-                                           false);
+        ret = libxl__nic_devtype.set_default(gc, dm_domid, &dm_config->nics[i],
+                                             false);
         if (ret)
             goto out;
     }
     if (dm_config->num_vfbs) {
-        ret = libxl__device_vfb_add(gc, dm_domid, &dm_config->vfbs[0]);
-        if (ret)
-            goto out;
+        ret = libxl__device_add(gc, dm_domid, &libxl__vfb_devtype,
+                                &dm_config->vfbs[0]);
+        if (ret) goto out;
     }
     if (dm_config->num_vkbs) {
-        ret = libxl__device_vkb_add(gc, dm_domid, &dm_config->vkbs[0]);
-        if (ret)
-            goto out;
+        ret = libxl__device_add(gc, dm_domid, &libxl__vkb_devtype,
+                                &dm_config->vkbs[0]);
+        if (ret) goto out;
     }
 
     if (guest_config->b_info.u.hvm.serial)
