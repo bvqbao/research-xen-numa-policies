@@ -1711,6 +1711,11 @@ static void svm_do_nested_pgfault(struct vcpu *v,
     else if ( pfec & NPT_PFEC_in_gpt )
         npfec.kind = npfec_kind_in_gpt;
 
+#ifdef XEN_NUMA_POLICY
+    if ( remap_realloc_now(v->domain, gfn, 1) )
+        return;        
+#endif
+
     ret = hvm_hap_nested_page_fault(gpa, ~0ul, npfec);
 
     if ( tb_init_done )

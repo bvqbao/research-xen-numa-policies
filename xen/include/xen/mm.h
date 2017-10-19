@@ -49,6 +49,10 @@
 #include <xen/types.h>
 #include <xen/list.h>
 #include <xen/spinlock.h>
+#ifdef XEN_NUMA_POLICY
+#include <xen/rbtree.h>
+#include <xen/numa.h>
+#endif /* XEN_NUMA_POLICY */
 #include <xen/typesafe.h>
 #include <xen/kernel.h>
 #include <xen/perfc.h>
@@ -630,5 +634,139 @@ static inline void filtered_flush_tlb_mask(uint32_t tlbflush_timestamp)
         flush_tlb_mask(&mask);
     }
 }
+
+#ifdef XEN_NUMA_POLICY
+
+#define REALLOC_POOL_ORDER          0
+#define REALLOC_POOL_SIZE           (1ul << REALLOC_POOL_ORDER)
+
+#define REALLOC_DELAY_TRIGGER       0
+#define REALLOC_APPLY_TRIGGER       32
+#define REALLOC_RMALL_TRIGGER       (1ul << 17)
+
+#define REALLOC_BATCH_SPIN_NS       25000
+#define REALLOC_BATCH_SPIN_COUNT    10
+
+#define REALLOC_MAX_WARNING         20
+
+#define REALLOC_TREE_ADDRLEN        52
+#define REALLOC_TREE_LEVELS         4
+#define REALLOC_TREE_PARTITION      13
+#define REALLOC_TREE_ARRLEN         (1ul << REALLOC_TREE_PARTITION)
+
+#define ENTRY_MASK							                       \
+	((1ul << REALLOC_TREE_PARTITION) - 1)
+#define ENTRY_LEVEL_SHIFT(level)					               \
+	((REALLOC_TREE_LEVELS - 1 - level) * REALLOC_TREE_PARTITION)
+#define ENTRY_LEVEL_INDEX(level, gfn)				               \
+	((gfn >> ENTRY_LEVEL_SHIFT(level)) & ENTRY_MASK)
+
+struct realloc_facility
+{
+	void              *token_tree;            /* how to finf the tokens */
+	rwlock_t           token_tree_lock;       /* lock for token_tree */
+
+	unsigned long      hypercall_bufsize;     /* size of the arrays */
+	uint64_t          *hypercall_pfns;        /* what pfn to work on */
+	uint64_t          *hypercall_tickets;     /* logic timestamp of op */
+	uint32_t          *hypercall_orders;      /* what order for the pfn */
+	uint32_t          *hypercall_cpus;        /* what cpu does the op */
+	uint32_t          *hypercall_operations;  /* what operation to do */
+
+	unsigned long      enabled;               /* remapping is enabled */
+	unsigned long      preparing;             /* # of preparing cores */
+
+	struct list_head   remap_bucket[NR_CPUS];       /* batch remapping */
+	spinlock_t         remap_bucket_lock[NR_CPUS];
+	unsigned long      remap_last_try[NR_CPUS];     /* last NPF memory */
+	
+	struct page_info  *page_pool[MAX_NUMNODES][REALLOC_POOL_SIZE];
+	unsigned long      page_pool_size[MAX_NUMNODES];    /* batch alloc */
+
+	unsigned long      apply_query;      /* amount of ready to map */
+	unsigned long      apply_done;       /* amount of actually mapped */
+	unsigned long      apply_running;    /* some core is mapping if !0 */
+};
+
+struct realloc_facility *alloc_realloc_facility(void);
+
+void free_realloc_facility(struct realloc_facility *ptr);
+
+/*
+ * Return 0 if operation complete, 1 if preempted (and need to be relaunched).
+ */
+int enable_realloc_facility(struct domain *d, int enable);
+
+/* Automata states */
+#define REALLOC_STATE_MAP   0      /* currently mapped - normal state */
+#define REALLOC_STATE_UBUSY 1      /* busy unmapping - transtory state */
+#define REALLOC_STATE_UNMAP 2      /* currently unmapped */
+#define REALLOC_STATE_DELAY 3      /* queued for remapping - still unmapped */
+#define REALLOC_STATE_BUSY  4      /* busy - transitory state */
+
+struct realloc_token
+{
+	unsigned long     gfn;          /* gfn mapped or to remap */
+	unsigned long     mfn;          /* last mfn mapped on */
+	int               copy;         /* need copy from old page */
+	unsigned int      type;         /* last mapping type */
+	unsigned int      access;       /* last mapping access */
+	int               state;        /* token automata state */
+	int               node;         /* node to remap on */
+	struct list_head  bucket_cell;  /* batching list cell */
+	unsigned long     unmap_ticket; /* ticket of the last unmap */
+	unsigned long     remap_ticket; /* ticket of the last remap */
+};
+
+/*
+ * Find the realloc token with the given gfn.
+ * Return the token if present, NULL otherwise.
+ */
+struct realloc_token *find_realloc_token(struct realloc_facility *f,
+                        unsigned long gfn);
+
+/* 
+ * Insert t in the token_tree of f, with the hint h (may be NULL).
+ * Return 0 on success, -1 if the token was already present.
+ */
+int insert_realloc_token(struct realloc_facility *f, struct realloc_token *t,
+                                    struct realloc_token *h);
+
+/* Return 0 on success, -1 if the token was not present. */
+int remove_realloc_token(struct realloc_facility *f, struct realloc_token *t);
+
+/*
+ * Register the given gfn with given size order for being reallocatable.
+ * Return the amount of 0-order pages registered successfully.
+ */
+unsigned long register_for_realloc(struct domain *d, unsigned long gfn,
+                                    unsigned int order);
+
+/*
+ * Unmap the given gfn making it ready for further reallocation.
+ * Return the amount of pages unmapped successfully.
+ */
+unsigned long unmap_realloc(struct domain *d, unsigned long gfn,
+                                unsigned long ticket);
+
+/*
+* Prepare to remap the given gfn making it available to the guest.
+* The reallocation is done lazily in batch.
+* Use the remap_realloc_now() function to force remapping.
+* Return the amount of pages prepared successfully.
+*/
+unsigned long remap_realloc(struct domain *d, unsigned long gfn,
+                                unsigned int node, unsigned long ticket);
+
+unsigned long apply_realloc(struct domain *d);
+
+unsigned long remap_realloc_now(struct domain *d, unsigned long gfn, int fault);
+
+/*
+ * Return 0 if all possible pages have been remapped, or 1 if preempted.
+ */
+int remap_all_pages(struct domain *d);
+
+#endif /* XEN_NUMA_POLICY */
 
 #endif /* __XEN_MM_H__ */

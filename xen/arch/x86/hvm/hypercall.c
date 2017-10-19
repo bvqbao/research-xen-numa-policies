@@ -20,6 +20,10 @@
  */
 #include <xen/lib.h>
 #include <xen/hypercall.h>
+#ifdef XEN_NUMA_POLICY
+#include <xen/guest_access.h>
+#include <xen/mm.h>
+#endif 
 
 #include <asm/hvm/support.h>
 
@@ -27,12 +31,75 @@ static long hvm_memory_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
 {
     const struct vcpu *curr = current;
     long rc;
+    unsigned long i;
+    uint64_t *pfns, *tickets;
+    uint32_t *operations, *cpus;
+    unsigned int nodes[NR_CPUS];
+    struct xen_page_mapping xmapping;
+    struct vcpu *vcpu;
 
     switch ( cmd & MEMOP_CMD_MASK )
     {
     case XENMEM_machine_memory_map:
     case XENMEM_machphys_mapping:
         return -ENOSYS;
+    case XENMEM_page_mapping:
+        rc = -ENOSYS;
+#ifdef XEN_NUMA_POLICY
+        if ( copy_from_guest(&xmapping, arg, 1) )
+            goto err;
+
+        pfns = xmalloc_array(uint64_t, xmapping.size);
+        cpus = xmalloc_array(uint32_t, xmapping.size);
+        operations = xmalloc_array(uint32_t, xmapping.size);
+        tickets = xmalloc_array(uint64_t, xmapping.size);
+
+        rc = -1;
+        if (!pfns || !operations || !tickets)
+            goto err_free;
+
+        if (__copy_from_guest_offset(pfns, xmapping.pfns, 0, xmapping.size))
+            goto err_free;
+
+        if (__copy_from_guest_offset(cpus, xmapping.cpus, 0,
+                                    xmapping.size))
+            goto err_free;
+        if (__copy_from_guest_offset(operations, xmapping.operations, 0,
+                                    xmapping.size))
+            goto err_free;
+        if (__copy_from_guest_offset(tickets, xmapping.tickets, 0,
+                                    xmapping.size))
+            goto err_free;
+
+        rc = 0;
+
+        for_each_vcpu (current->domain, vcpu)
+            nodes[vcpu->vcpu_id] = cpu_to_node(vcpu->processor);
+
+        /*
+        * We go in reverse order to apply the latest operations only, the
+        * older ones will be discarded.
+        */
+        
+        for (i = xmapping.size - 1; i < xmapping.size ; i--)
+            if ( operations[i] == XENMEM_page_mapping_remap )
+                rc |= remap_realloc(current->domain, pfns[i], nodes[cpus[i]], 
+                                        tickets[i]);
+
+        for (i = xmapping.size - 1; i < xmapping.size ; i--)
+            if ( operations[i] == XENMEM_page_mapping_unmap )
+                rc |= unmap_realloc(current->domain, pfns[i], tickets[i]);
+            else if ( operations[i] != XENMEM_page_mapping_remap )
+                rc = -1;
+
+    err_free:
+        xfree(pfns);
+        xfree(cpus);
+        xfree(operations);
+        xfree(tickets);
+    err:
+#endif /* XEN_NUMA_POLICY */
+        return rc; 
     }
 
     if ( !curr->hcall_compat )

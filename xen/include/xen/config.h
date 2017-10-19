@@ -86,4 +86,7 @@
 #define NDEBUG
 #endif
 
+/* Enable numa policies. */
+#define XEN_NUMA_POLICY
+
 #endif /* __XEN_CONFIG_H__ */

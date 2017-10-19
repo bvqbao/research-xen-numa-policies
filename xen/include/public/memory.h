@@ -565,6 +565,19 @@ DEFINE_XEN_GUEST_HANDLE(xen_mem_sharing_op_t);
  * The zero value is appropriate.
  */
 
+#define XENMEM_page_mapping             42
+#define XENMEM_page_mapping_unmap        0
+#define XENMEM_page_mapping_remap        1
+struct xen_page_mapping {
+    uint64_t size;
+    XEN_GUEST_HANDLE(uint64_t) pfns;
+    XEN_GUEST_HANDLE(uint32_t) cpus;
+    XEN_GUEST_HANDLE(uint32_t) operations;
+    XEN_GUEST_HANDLE(uint64_t) tickets;
+};
+typedef struct xen_page_mapping xen_page_mapping_t;
+DEFINE_XEN_GUEST_HANDLE(xen_page_mapping_t);
+
 /*
  * With some legacy devices, certain guest-physical addresses cannot safely
  * be used for other purposes, e.g. to map guest RAM.  This hypercall

@@ -251,6 +251,10 @@ static void populate_physmap(struct memop_args *a)
 
             guest_physmap_add_page(d, _gfn(gpfn), _mfn(mfn), a->extent_order);
 
+#ifdef XEN_NUMA_POLICY
+            register_for_realloc(d, gpfn, a->extent_order);
+#endif 
+
             if ( !paging_mode_translate(d) )
             {
                 for ( j = 0; j < (1U << a->extent_order); j++ )
@@ -1494,6 +1498,606 @@ int prepare_ring_for_helper(
 
     return 0;
 }
+
+#ifdef XEN_NUMA_POLICY
+
+#define __atomic64_read(src)   read_u64_atomic(src)
+
+static inline void __atomic64_add(unsigned long *dest, unsigned long add)
+{
+    asm volatile ("lock; addq %1, %0"
+                  : "=m" (*(volatile unsigned long *) dest)
+                  : "r" (add), "m" (*(volatile unsigned long *) dest));
+}
+
+static inline void __atomic64_sub(unsigned long *dest, unsigned long sub)
+{
+    asm volatile ("lock; subq %1, %0"
+                  : "=m" (*(volatile unsigned long *) dest)
+                  : "r" (sub), "m" (*(volatile unsigned long *) dest));
+}
+
+struct realloc_facility *alloc_realloc_facility(void)
+{
+    struct realloc_facility *ptr = xzalloc(struct realloc_facility);
+    int cpu, node;
+
+    if (ptr == NULL)
+        return NULL;
+
+    rwlock_init(&ptr->token_tree_lock);
+
+    for_each_online_cpu (cpu) {
+        INIT_LIST_HEAD(&ptr->remap_bucket[cpu]);
+        spin_lock_init(&ptr->remap_bucket_lock[cpu]);
+        ptr->remap_last_try[cpu] = 0;
+    }
+
+    ptr->enabled = 0;
+    ptr->preparing = 0;
+
+    for (node = 0; node < MAX_NUMNODES; node++)
+        ptr->page_pool_size[node] = 0;
+
+    ptr->apply_query = 0;
+    ptr->apply_done = 0;
+    ptr->apply_running = 0;
+
+    return ptr;
+}
+
+static void __free_realloc_facility(int level, void *stage)
+{
+    unsigned long index;
+    void *ptr;
+    
+    if (level < REALLOC_TREE_LEVELS) {
+        for (index = 0; index < ENTRY_MASK; index++) {
+            ptr = ((void **) stage)[index];
+            if (ptr == NULL)
+                continue;
+            __free_realloc_facility(level + 1, ptr);
+        }
+    }
+
+    xfree(stage);
+}
+
+void free_realloc_facility(struct realloc_facility *ptr)
+{
+    unsigned long i;
+    int node;
+
+    if (ptr->token_tree != NULL)
+        __free_realloc_facility(0, ptr->token_tree);
+
+    for (node = 0; node < MAX_NUMNODES; node++)
+        for (i=0; i<ptr->page_pool_size[node]; i++)
+            free_domheap_pages(ptr->page_pool[node][i], 0);
+
+    xfree(ptr);
+}
+
+int enable_realloc_facility(struct domain *d, int enable)
+{
+    if (enable) {
+        d->realloc->enabled = 1;
+                
+        return 0;
+    } else {
+        /* Signal we are stopping, so other cores must stop unmapping */
+        d->realloc->enabled = 0;
+
+        /*
+         * If cores were already unmapping, wait for them to finish.
+         * NB: performance is not required here.
+         */
+        while (__atomic64_read(&d->realloc->preparing))
+            ;
+
+        /*
+         * Remapping pages can be a long operation, so remap_all_pages() return
+         * 1 if we need to return because of preemption, 0 if complete.
+         */
+        return remap_all_pages(d);
+    }
+}
+
+struct realloc_token *find_realloc_token(struct realloc_facility *f,
+                                         unsigned long gfn)
+{
+    struct realloc_token *data = NULL;
+    void *stage = f->token_tree;
+    unsigned long index;
+    int level;
+
+    for (level = 0; level < REALLOC_TREE_LEVELS; level++) {
+        if (stage == NULL)
+            break;
+            
+        index = ENTRY_LEVEL_INDEX(level, gfn);
+        stage = ((void **) stage)[index];
+    }
+
+    data = (struct realloc_token *) stage;
+
+    return data;
+}
+
+int insert_realloc_token(struct realloc_facility *f, struct realloc_token *t,
+                         struct realloc_token *h)
+{
+    void **stage = &f->token_tree;
+    unsigned long index, gfn = t->gfn;
+    int level;
+    
+    for (level = 0; level < REALLOC_TREE_LEVELS; level++) {
+        if (*stage == NULL)
+            *stage = xzalloc_array(void *, REALLOC_TREE_ARRLEN);
+        if (*stage == NULL) {
+            return -1;
+        }
+            
+        index = ENTRY_LEVEL_INDEX(level, gfn);
+        stage = &((*((void ***) stage))[index]);
+    }
+    
+    *((struct realloc_token **) stage) = t;
+    return 0;
+}
+
+int remove_realloc_token(struct realloc_facility *f, struct realloc_token *t)
+{
+    void **stage = &f->token_tree;
+    unsigned long index, gfn = t->gfn;
+    int level;
+
+    for (level = 0; level < REALLOC_TREE_LEVELS; level++) {
+        if (*stage == NULL)
+            return -1;
+        
+        index = ENTRY_LEVEL_INDEX(level, gfn);
+        stage = &((*((void ***) stage))[index]);
+    }
+
+    *((struct realloc_token **) stage) = NULL;
+    return 0;
+}
+
+static int __register_one_for_realloc(struct domain *d, unsigned long gfn)
+{
+    struct realloc_token *token, *hint;
+    int ret = 0;
+
+    write_lock(&d->realloc->token_tree_lock);
+
+    hint = find_realloc_token(d->realloc, gfn);
+    if (hint != NULL && hint->gfn == gfn)
+        goto err_unlock;
+
+    token = xmalloc(struct realloc_token);
+    if (token == NULL)
+        goto err_unlock;
+
+    token->gfn = gfn;
+    token->state = REALLOC_STATE_MAP;
+    token->copy = 0;
+    token->unmap_ticket = 0;
+    token->remap_ticket = 0;
+
+    if (insert_realloc_token(d->realloc, token, hint) != 0) {
+        xfree(token);
+        goto err_unlock;
+    }
+
+    ret = 1;
+err_unlock:
+    write_unlock(&d->realloc->token_tree_lock);
+    return ret;
+}
+
+unsigned long register_for_realloc(struct domain *d, unsigned long gfn,
+                                   unsigned int order)
+{
+    unsigned long count = 0;
+    unsigned long cur, last = gfn + (1ul << order);
+
+    for (cur = gfn; cur < last; cur++)
+        if (__register_one_for_realloc(d, cur))
+            count++;
+
+    return count;
+}
+
+static int __update_ticket(unsigned long *ticket, unsigned long new)
+{
+    unsigned long old, expected = 0;
+    
+    while (new > expected) {
+        old = cmpxchg(ticket, expected, new);
+        if (old == expected)
+            return 1;
+        expected = old;
+    }
+
+    return 0;
+}
+
+static void __unmap_prepare_one(struct domain *d, unsigned long gfn,
+                                unsigned long ticket)
+{
+    struct p2m_domain *p2m = p2m_get_hostp2m(d);
+    struct page_info *old;
+    p2m_access_t access;
+    unsigned long mfn;
+    p2m_type_t type;
+    struct realloc_token *token;
+    int state, nstate, flags, ret = 0;
+
+    read_lock(&d->realloc->token_tree_lock);
+    token = find_realloc_token(d->realloc, gfn);
+    read_unlock(&d->realloc->token_tree_lock);
+    
+    if (token == NULL || token->gfn != gfn)
+        return;
+
+    if (!__update_ticket(&token->unmap_ticket, ticket))
+        return;
+    if (ticket < token->remap_ticket)
+        return;
+    
+    nstate = REALLOC_STATE_MAP;
+    state = cmpxchg(&token->state, REALLOC_STATE_MAP, REALLOC_STATE_UBUSY);
+    if (state != REALLOC_STATE_MAP)
+        return;
+
+    flags = P2M_ALLOC | P2M_UNSHARE;
+    mfn = mfn_x(get_gfn_type_access(p2m, gfn, &type, &access, flags, 0));
+
+    if ( unlikely(!mfn_valid(_mfn(mfn))) )
+        goto err_gfn;
+
+    if ( p2m_is_shared(type) )
+        goto err_gfn;
+
+    old = mfn_to_page(mfn);
+    if ( unlikely(steal_page(d, old, MEMF_no_refcount)) )
+        goto err_gfn;
+
+    token->mfn = mfn;
+    token->type = type;
+    token->access = access;
+
+    p2m->set_entry(p2m, _gfn(gfn), INVALID_MFN, 0, p2m_ram_paged, p2m_access_n, -1);
+
+    ret = 1;
+    nstate = REALLOC_STATE_UNMAP;
+err_gfn:
+    put_gfn(d, gfn);
+
+    state = cmpxchg(&token->state, REALLOC_STATE_UBUSY, nstate);
+    if (state != REALLOC_STATE_UBUSY)
+        BUG();
+}
+
+unsigned long unmap_realloc(struct domain *d, unsigned long gfn,
+                            unsigned long ticket)
+{
+    unsigned long count = 0;
+
+    if (!d->realloc->enabled)
+        return 0;
+
+    /* Signal someone is preparing so do not die now. */
+    __atomic64_add(&d->realloc->preparing, 1);
+
+    /*
+     * enabled may have been unset between the first check and our
+     * notification, so recheck here.
+     */
+    if (!d->realloc->enabled)
+        goto out;
+
+    __unmap_prepare_one(d, gfn, ticket);
+    count = 1;
+
+out:
+    __atomic64_sub(&d->realloc->preparing, 1);
+    return count;
+}
+
+static int __remap_realloc_one(struct domain *d, unsigned long gfn, int copy,
+                               int fault, unsigned int node,
+                               unsigned long ticket)
+{
+    struct realloc_token *token;
+    unsigned int cpu = smp_processor_id();
+    int state, ret = 0;
+
+    read_lock(&d->realloc->token_tree_lock);
+    token = find_realloc_token(d->realloc, gfn);
+    read_unlock(&d->realloc->token_tree_lock);
+
+    if (token == NULL || token->gfn != gfn)
+        goto err;
+
+    if (ticket && !__update_ticket(&token->remap_ticket, ticket))
+        goto out;
+
+    /*
+     * For now, UBUSY, BUSY and DELAY are transitory states so we want to
+     * wait the token reach a stable state to decide what to do.
+     */
+
+    do {
+        state = cmpxchg(&token->state, REALLOC_STATE_UNMAP,REALLOC_STATE_BUSY);
+    } while (state == REALLOC_STATE_UBUSY ||
+             state == REALLOC_STATE_BUSY);
+
+    if (state != REALLOC_STATE_UNMAP) {
+
+        /* If already mapped, then it's ok, do nothing */
+        if (state == REALLOC_STATE_MAP || state == REALLOC_STATE_DELAY)
+            goto out;
+                
+        goto err;
+    }
+
+    token->node = node;
+
+    spin_lock(&d->realloc->remap_bucket_lock[cpu]);
+
+    list_add(&token->bucket_cell, &d->realloc->remap_bucket[cpu]);
+
+    state = cmpxchg(&token->state, REALLOC_STATE_BUSY, REALLOC_STATE_DELAY);
+    if (state != REALLOC_STATE_BUSY)
+        BUG();
+
+    spin_unlock(&d->realloc->remap_bucket_lock[cpu]);
+
+    __atomic64_add(&d->realloc->apply_query, 1);
+out:
+    ret = 1;
+err:
+    return ret;
+}
+
+unsigned long remap_realloc(struct domain *d, unsigned long gfn,
+                            unsigned int node, unsigned long ticket)
+{
+    unsigned long count = 0;
+    unsigned long query, done;
+
+    if (__remap_realloc_one(d, gfn, 0, 0, node, ticket))
+        count = 1;
+
+    query = __atomic64_read(&d->realloc->apply_query);
+    done = __atomic64_read(&d->realloc->apply_done);
+    if (done + REALLOC_APPLY_TRIGGER < query)
+        apply_realloc(d);
+    
+    return count;
+}
+
+static int __replace_page(struct domain *d, unsigned long gfn,
+                          struct page_info *old, struct page_info *new,
+                          p2m_type_t type, p2m_access_t access, int copy)
+{
+    unsigned long old_mfn = page_to_mfn(old), new_mfn = page_to_mfn(new);
+    struct p2m_domain *p2m = p2m_get_hostp2m(d);
+
+    if ( assign_pages(d, new, 0, MEMF_no_refcount) )
+        return -1;
+
+    if (copy)
+        copy_domain_page(_mfn(new_mfn), _mfn(old_mfn));
+
+    guest_physmap_add_page(d, _gfn(gfn), _mfn(new_mfn), 0);
+    
+    if (type != p2m_ram_rw || access != p2m->default_access)
+        p2m->set_entry(p2m, _gfn(gfn), _mfn(new_mfn), 0, type, access, -1);
+
+    put_page(old);
+
+    if ( !paging_mode_translate(d) )
+        set_gpfn_from_mfn(new_mfn, gfn);
+
+    return 0;
+}
+
+static struct page_info *__alloc_cached_page(struct domain *d, int node)
+{
+    unsigned int memflags, i;
+    unsigned long mfn, *size;
+    struct page_info *pg;
+
+    memflags = domain_clamp_alloc_bitsize(d, BITS_PER_LONG + PAGE_SHIFT);
+    memflags = MEMF_bits(memflags);
+    memflags = memflags | MEMF_node(node);
+
+    size = &d->realloc->page_pool_size[node];
+
+    if (*size == 0) {
+        pg = alloc_domheap_pages(NULL, REALLOC_POOL_ORDER, memflags);
+        mfn = page_to_mfn(pg);
+        for (i = 0; i < REALLOC_POOL_SIZE; i++)
+            d->realloc->page_pool[node][i] = mfn_to_page(mfn + i);
+        *size = REALLOC_POOL_SIZE;
+    }
+    
+    (*size)--;
+    return d->realloc->page_pool[node][*size];
+}
+
+static unsigned int __apply_realloc_one(struct domain *d,
+                                        struct realloc_token *token)
+{
+    struct page_info *old = NULL;
+    struct page_info *new = NULL;
+    int ret, state;
+
+    state = cmpxchg(&token->state, REALLOC_STATE_DELAY, REALLOC_STATE_BUSY);
+    if (state != REALLOC_STATE_DELAY)
+        return 1;
+
+    old = mfn_to_page(token->mfn);
+
+    new = __alloc_cached_page(d, token->node);
+    if ( unlikely(new == NULL) )
+        goto fail_old;
+    
+    raw_p2m_lock(p2m_get_hostp2m(d));
+    ret = __replace_page(d, token->gfn, old, new, token->type, 
+                            token->access, token->copy);
+    raw_p2m_unlock(p2m_get_hostp2m(d));
+    
+    if ( ret )
+        goto fail_new;
+
+    goto out;
+ fail_new:
+    free_domheap_pages(new, 0);
+ fail_old:
+    /* Now reassign the old mfn to the domain */
+    if ( assign_pages(d, old, 0, MEMF_no_refcount) )
+        BUG();
+    
+ out:
+    state = cmpxchg(&token->state, REALLOC_STATE_BUSY, REALLOC_STATE_MAP);
+    if (state != REALLOC_STATE_BUSY)
+        BUG();
+    
+    return 1;
+}
+
+static inline void __spin_ns(unsigned long ns)
+{
+    unsigned long end = NOW() + ns;
+    while (NOW() < end)
+        ;
+}
+
+unsigned long apply_realloc(struct domain *d)
+{
+    struct realloc_token *token;
+    struct list_head *cell;
+    unsigned long done, cpudone, count = 0;
+    unsigned long query, running = -1;
+    unsigned long waited;
+    int cpu;
+
+    query = __atomic64_read(&d->realloc->apply_query);
+    done = __atomic64_read(&d->realloc->apply_done);
+    if (done >= query)
+        goto out;
+
+    waited = 0;
+    running = cmpxchg(&d->realloc->apply_running, 0, 1);
+    while (running != 0) {
+        __spin_ns(REALLOC_BATCH_SPIN_NS);
+        waited++;
+        
+        done = __atomic64_read(&d->realloc->apply_done);
+        if (done >= query) {
+            goto out;
+        }
+        
+        running = cmpxchg(&d->realloc->apply_running, 0, 1);
+    }
+
+    for_each_online_cpu (cpu) {
+        cpudone = 0;
+        spin_lock(&d->realloc->remap_bucket_lock[cpu]);
+
+        while (!list_empty(&d->realloc->remap_bucket[cpu])) {
+            cell = d->realloc->remap_bucket[cpu].next;
+            token = container_of(cell, struct realloc_token, bucket_cell);
+    
+            __apply_realloc_one(d, token);
+
+            list_del(cell);
+            cpudone++;
+        }
+
+        spin_unlock(&d->realloc->remap_bucket_lock[cpu]);
+
+        __atomic64_add(&d->realloc->apply_done, cpudone);
+        count += cpudone;
+    }
+
+ out:
+    if (running == 0)
+        cmpxchg(&d->realloc->apply_running, 1, 0);
+    return count;
+}
+
+unsigned long remap_realloc_now(struct domain *d, unsigned long gfn, int fault)
+{
+    unsigned long count = 0;
+    unsigned int cpu = smp_processor_id();
+
+    if (__remap_realloc_one(d, gfn, 0, fault, cpu_to_node(cpu), 0))
+        count = 1;
+
+    apply_realloc(d);
+    return count;
+}
+
+static int __remap_all_pages(struct domain *d, int level, void *stage)
+{
+    unsigned long index, query, done;
+    struct realloc_token *token;
+    void *ptr;
+
+    if (level < REALLOC_TREE_LEVELS) {
+        for (index = 0; index <= ENTRY_MASK; index++) {
+            ptr = ((void **) stage)[index];
+            if (ptr == NULL)
+                continue;
+            if (__remap_all_pages(d, level + 1, ptr))
+                return 1;
+        }
+
+        return 0;
+    }
+
+    token = (struct realloc_token *) stage;
+    if (token->state == REALLOC_STATE_UNMAP)
+        __remap_realloc_one(d, token->gfn, 1, 0, 0, 0);
+    else
+        return 0;
+
+    query = __atomic64_read(&d->realloc->apply_query);
+    done = __atomic64_read(&d->realloc->apply_done);
+    if (done + REALLOC_RMALL_TRIGGER < query) {
+        apply_realloc(d);
+        
+        if (hypercall_preempt_check())
+            return 1;
+    }
+
+    return 0;
+}
+
+int remap_all_pages(struct domain *d)
+{
+    int rc = 0;
+    
+    read_lock(&d->realloc->token_tree_lock);
+
+    if (d->realloc->token_tree != NULL)
+        rc = __remap_all_pages(d, 0, d->realloc->token_tree);
+
+    read_unlock(&d->realloc->token_tree_lock);
+
+    if (rc)
+        return 1;
+    
+    apply_realloc(d);
+    return 0;
+}
+
+#endif /* XEN_NUMA_POLICY */
 
 /*
  * Local variables:

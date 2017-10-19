@@ -304,12 +304,60 @@ void __init do_initcalls(void)
  * Simple hypercalls.
  */
 
+#ifdef XEN_NUMA_POLICY
+/* xen-trigger -1 u<0,1> u<dom-id> */
+#define HYPERCALL_NUMA_FT   -1
+#endif
+
 DO(xen_version)(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
 {
     bool_t deny = !!xsm_xen_version(XSM_OTHER, cmd);
 
     switch ( cmd )
     {
+
+#ifdef XEN_NUMA_POLICY
+    case HYPERCALL_NUMA_FT:
+    {
+        unsigned long arr[2];
+        unsigned long enable;
+        unsigned long domain;
+        struct domain *d;
+
+        if ( copy_from_guest(&arr[0], arg, 2) ) {
+            printk("error on arg\n");
+            return -1;
+        }
+
+        enable = arr[0];
+        domain = arr[1];
+
+        if (domain == 0) {
+            d = get_domain_by_id(0);
+            while (d != NULL) {
+                if (enable_realloc_facility(d, (int) enable))
+                    return hypercall_create_continuation(
+                        __HYPERVISOR_xen_version, "ih",
+                        HYPERCALL_NUMA_FT, arg);
+                d = d->next_in_list;
+            }
+        } else {
+            d = get_domain_by_id((domid_t) domain);
+            if (d != NULL) {
+                if (enable_realloc_facility(d, (int) enable))
+                    return hypercall_create_continuation(
+                        __HYPERVISOR_xen_version, "ih",
+                        HYPERCALL_NUMA_FT, arg);
+                d = d->next_in_list;
+            } else {
+                return -1;
+            }
+        }
+        
+        return 0;
+    }    
+#endif /* XEN_NUMA_POLICY */
+
     case XENVER_version:
         return (xen_major_version() << 16) | xen_minor_version();
 

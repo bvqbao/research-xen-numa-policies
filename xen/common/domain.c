@@ -75,6 +75,10 @@ static void __domain_finalise_shutdown(struct domain *d)
 {
     struct vcpu *v;
 
+#ifdef XEN_NUMA_POLICY
+    enable_realloc_facility(d, 0);
+#endif
+
     BUG_ON(!spin_is_locked(&d->shutdown_lock));
 
     if ( d->is_shut_down )
@@ -370,6 +374,12 @@ struct domain *domain_create(domid_t domid, unsigned int domcr_flags,
         d->pbuf = xzalloc_array(char, DOMAIN_PBUF_SIZE);
         if ( !d->pbuf )
             goto fail;
+
+#ifdef XEN_NUMA_POLICY
+        d->realloc = alloc_realloc_facility();
+        if ( !d->realloc )
+            goto fail; 
+#endif
     }
 
     if ( (err = arch_domain_create(d, domcr_flags, config)) != 0 )
@@ -828,6 +838,10 @@ static void complete_domain_destroy(struct rcu_head *head)
 #endif
 
     xfree(d->pbuf);
+    
+#ifdef XEN_NUMA_POLICY
+    free_realloc_facility(d->realloc);
+#endif
 
     for ( i = d->max_vcpus - 1; i >= 0; i-- )
         if ( (v = d->vcpu[i]) != NULL )

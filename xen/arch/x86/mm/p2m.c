@@ -1523,9 +1523,16 @@ void p2m_mem_paging_populate(struct domain *d, unsigned long gfn_l)
     gfn_t gfn = _gfn(gfn_l);
     mfn_t mfn;
     struct p2m_domain *p2m = p2m_get_hostp2m(d);
+    int rc;
+
+#ifdef XEN_NUMA_POLICY
+    /* Check if it is first-touch paging */
+    if ( remap_realloc_now(d, gfn_l, 0) )
+        return;
+#endif
 
     /* We're paging. There should be a ring */
-    int rc = vm_event_claim_slot(d, d->vm_event_paging);
+    rc = vm_event_claim_slot(d, d->vm_event_paging);
     if ( rc == -ENOSYS )
     {
         gdprintk(XENLOG_ERR, "Domain %hu paging gfn %lx yet no ring "
@@ -2625,6 +2632,21 @@ out:
         rcu_unlock_domain(fdom);
     return rc;
 }
+
+/*
+ * Numa First-Touch: if you say you lock a single gfn, lock the fucking gfn and not the
+ * entire page table, otherwise, just admit you put a fucking giant lock!
+ */
+void raw_p2m_lock(struct p2m_domain *p2m)
+{
+    p2m_lock(p2m);
+}
+
+void raw_p2m_unlock(struct p2m_domain *p2m)
+{
+    p2m_unlock(p2m);
+}
+
 /*
  * Local variables:
  * mode: C

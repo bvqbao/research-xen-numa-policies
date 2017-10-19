@@ -862,6 +862,9 @@ int p2m_set_ioreq_server(struct domain *d, unsigned int flags,
 struct hvm_ioreq_server *p2m_get_ioreq_server(struct domain *d,
                                               unsigned int *flags);
 
+void raw_p2m_lock(struct p2m_domain *p2m);
+void raw_p2m_unlock(struct p2m_domain *p2m);
+
 #endif /* _XEN_ASM_X86_P2M_H */
 
 /*
