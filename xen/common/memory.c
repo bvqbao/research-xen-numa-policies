@@ -138,6 +138,10 @@ static void increase_reservation(struct memop_args *a)
     a->nr_done = i;
 }
 
+#ifdef XEN_NUMA_POLICY
+int dom_memalloc_max_order = PAGE_ORDER_1G;
+#endif
+
 static void populate_physmap(struct memop_args *a)
 {
     struct page_info *page;
@@ -225,6 +229,10 @@ static void populate_physmap(struct memop_args *a)
 
                 mfn = gpfn;
             }
+#ifdef XEN_NUMA_POLICY
+            else if ( a->extent_order > dom_memalloc_max_order )
+                goto out;
+#endif
             else
             {
                 page = alloc_domheap_pages(d, a->extent_order, a->memflags);

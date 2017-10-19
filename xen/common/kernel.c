@@ -306,7 +306,10 @@ void __init do_initcalls(void)
 
 #ifdef XEN_NUMA_POLICY
 /* xen-trigger -1 u<0,1> u<dom-id> */
-#define HYPERCALL_NUMA_FT   -1
+#define HYPERCALL_NUMA_FT           -1
+/* xen-trigger -2 u<0,9,18,...> */
+#define HYPERCALL_MEMALLOC_GRAIN    -2
+extern unsigned int dom_memalloc_max_order;   
 #endif
 
 DO(xen_version)(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
@@ -354,6 +357,17 @@ DO(xen_version)(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
             }
         }
         
+        return 0;
+    }
+    case HYPERCALL_MEMALLOC_GRAIN:
+    {
+        unsigned long grain;
+
+        if ( copy_from_guest(&grain, arg, 1) )
+            return -1;
+
+            dom_memalloc_max_order = (int) grain;
+
         return 0;
     }    
 #endif /* XEN_NUMA_POLICY */
